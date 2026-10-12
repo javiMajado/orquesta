@@ -1,0 +1,11 @@
+{
+  "name": "@orquesta/shared",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./types": "./src/types.js",
+    "./expr": "./src/expr.js",
+    "./env": "./src/env.js",
+    "./cron": "./src/cron.js"
+  }
+}

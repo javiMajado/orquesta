@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Icono de Orquesta: un nodo director que reparte trabajo a dos nodos (grafo de un workflow) -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8b6cff"/>
+      <stop offset="1" stop-color="#3a1d9e"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".22"/>
+      <stop offset=".5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#shine)"/>
+  <g fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" opacity=".92">
+    <path d="M92 128 C 128 128, 136 78, 170 78"/>
+    <path d="M92 128 C 128 128, 136 178, 170 178"/>
+  </g>
+  <circle cx="74" cy="128" r="30" fill="#ffffff"/>
+  <circle cx="74" cy="128" r="12" fill="#3a1d9e"/>
+  <circle cx="184" cy="78" r="25" fill="#ffc94d"/>
+  <circle cx="184" cy="178" r="25" fill="#4fe0c4"/>
+</svg>

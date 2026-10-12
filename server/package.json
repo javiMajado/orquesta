@@ -1,0 +1,19 @@
+{
+  "name": "@orquesta/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch-path=src --watch-path=../worker/src --watch-path=../packages/shared/src src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@orquesta/shared": "*",
+    "@orquesta/worker": "*",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.15",
+    "ws": "^8.18.0"
+  }
+}

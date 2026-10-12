@@ -1,0 +1,20 @@
+{
+  "name": "@orquesta/desktop",
+  "productName": "Orquesta",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node scripts/start.js",
+    "icon": "electron scripts/make-icon.cjs",
+    "dist": "node scripts/stage.js && electron-builder --config electron-builder.config.cjs --win"
+  },
+  "dependencies": {
+    "@orquesta/server": "*"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  }
+}

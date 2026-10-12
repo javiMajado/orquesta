@@ -1,0 +1,44 @@
+services:
+  orquesta:
+    build: .
+    ports: ["127.0.0.1:3000:3000"]
+    env_file: .env
+    # En Docker hay que escuchar en todas las interfaces del contenedor y aceptar el host
+    # «orquesta» que usan los workers. Define WORKER_TOKEN (y API_TOKEN) en .env: sin él,
+    # los workers externos no pueden conectarse.
+    environment:
+      DB_FILE: /app/data/orquesta.db
+      HOST: 0.0.0.0
+      ALLOWED_HOSTS: orquesta
+    volumes:
+      - orquesta-data:/app/data
+    restart: unless-stopped
+
+  # Worker dedicado a agentes IA. Escala con: docker compose up --scale worker-llm=3
+  worker-llm:
+    build: .
+    command: ["node", "worker/src/index.js"]
+    env_file: .env
+    environment:
+      ORQ_URL: ws://orquesta:3000/ws/worker
+      WORKER_CAPS: llm
+      WORKER_MAX: "4"
+    depends_on: [orquesta]
+    restart: unless-stopped
+
+  # Worker para scripts Node.js, HTTP, email y bases de datos
+  worker-node:
+    build: .
+    command: ["node", "worker/src/index.js"]
+    env_file: .env
+    environment:
+      ORQ_URL: ws://orquesta:3000/ws/worker
+      WORKER_CAPS: node,db
+      WORKER_MAX: "8"
+    volumes:
+      - orquesta-data:/app/data
+    depends_on: [orquesta]
+    restart: unless-stopped
+
+volumes:
+  orquesta-data:
