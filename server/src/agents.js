@@ -80,12 +80,18 @@ export const deleteAgent = id => Agents.remove(id);
 export const ensureAgent = def => Agents.findByName(def.name) || createAgent(def);
 
 // Parámetros efectivos de un nodo Agente. Sin agentId, los del propio nodo.
+// overrideProvider/overrideModel: el nodo cambia el modelo del agente solo para él
+// (otro proveedor sin modelo = el modelo por defecto de ese proveedor, no el del agente).
 export function applyAgent(params = {}) {
-  const { agentId, extraPrompt, ...rest } = params;
+  const { agentId, extraPrompt, overrideProvider, overrideModel, ...rest } = params;
   if (!agentId) return { params: rest, agent: null };
   const agent = Agents.get(agentId);
   if (!agent) throw Object.assign(new Error(`El agente personalizado «${agentId}» ya no existe: elige otro en el nodo`), { retryable: false });
   const extra = String(extraPrompt || '').trim();
   const prompt = [agent.config.prompt, extra].filter(Boolean).join('\n\n');
-  return { params: { ...rest, ...agent.config, prompt }, agent };
+  const out = { ...rest, ...agent.config, prompt };
+  const prov = String(overrideProvider || '').trim(), model = String(overrideModel || '').trim();
+  if (prov && prov !== out.provider) Object.assign(out, { provider: prov, model: '' });
+  if (model) out.model = model;
+  return { params: out, agent };
 }

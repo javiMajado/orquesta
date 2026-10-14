@@ -1,4 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
+import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 // Cliente de chat común para todos los proveedores:
 //   const chat = openChat(provider, opts); const r = await chat.next(); chat.pushResults([...])
@@ -14,25 +16,48 @@ export function apiError(status, msg) {
 }
 const clip = s => String(s || '').slice(0, 400);
 
+// OpenCode Go (https://opencode.ai/docs/go#where-can-i-use-it): exige un x-opencode-session
+// estable por conversación para enrutar y cachear, y pide que el cliente se identifique con su
+// propio user-agent en vez del nombre genérico del SDK. El id de sesión es el del worker si lo hay.
+const OPENCODE_SESSION = `orquesta-${process.env.WORKER_ID || crypto.randomUUID()}`;
+const VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version || '0';
+const isOpencode = url => { try { return new URL(url).host.endsWith('opencode.ai'); } catch { return false; } };
+const opencodeHeaders = url => (isOpencode(url) ? { 'x-opencode-session': OPENCODE_SESSION, 'user-agent': `orquesta/${VERSION}` } : {});
+
+// Hay modelos que ya no aceptan `temperature` (p. ej. claude-haiku-5-5): si el servidor responde
+// 400 «`temperature` is deprecated», se reintenta sin ella y se recuerda para el resto del proceso.
+const noTemperature = new Set(); // «kind:model»
+const isDeprecatedTemp = (status, msg) => status === 400 && /`temperature` is deprecated/i.test(String(msg || ''));
+
 function anthropicChat(p, { model, system, user, maxTokens, temperature, tools, signal }) {
   const { baseUrl, key } = p.secret();
   // authToken: null evita que el SDK lea ANTHROPIC_AUTH_TOKEN del entorno por su cuenta.
   // maxRetries: 0 porque los reintentos los decide el orquestador (y así se ven y se cuentan).
   const client = new Anthropic({ apiKey: key, authToken: null, baseURL: baseUrl, maxRetries: 0 });
+  const headers = opencodeHeaders(baseUrl);
+  const noTempKey = `anthropic:${model}`;
   const messages = [{ role: 'user', content: user }];
   return {
     async next() {
       let res;
-      try {
-        res = await client.messages.create({
-          model, max_tokens: maxTokens, messages,
-          ...(system ? { system } : {}),
-          ...(Number.isFinite(temperature) ? { temperature } : {}),
-          ...(tools.length ? { tools: tools.map(t => t.def) } : {}),
-        }, { signal });
-      } catch (e) {
-        if (e?.name === 'AbortError' || signal?.aborted) throw e;
-        throw apiError(e?.status, clip(e?.error?.error?.message || e?.message));
+      for (;;) {
+        try {
+          res = await client.messages.create({
+            model, max_tokens: maxTokens, messages,
+            ...(system ? { system } : {}),
+            ...(Number.isFinite(temperature) && !noTemperature.has(noTempKey) ? { temperature } : {}),
+            ...(tools.length ? { tools: tools.map(t => t.def) } : {}),
+          }, { signal, headers });
+          break;
+        } catch (e) {
+          if (e?.name === 'AbortError' || signal?.aborted) throw e;
+          const msg = clip(e?.error?.error?.message || e?.message);
+          if (Number.isFinite(temperature) && !noTemperature.has(noTempKey) && isDeprecatedTemp(e?.status, msg)) {
+            noTemperature.add(noTempKey);
+            continue;
+          }
+          throw apiError(e?.status, msg);
+        }
       }
       const toolUse = res.stop_reason === 'tool_use';
       if (toolUse) messages.push({ role: 'assistant', content: res.content });
@@ -64,7 +89,7 @@ async function openaiFetch(p, path, { method = 'GET', body, signal } = {}) {
   try {
     r = await fetch(openaiUrl(baseUrl, path), {
       method, signal,
-      headers: { authorization: `Bearer ${key}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+      headers: { authorization: `Bearer ${key}`, ...opencodeHeaders(baseUrl), ...(body ? { 'content-type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
@@ -78,17 +103,31 @@ async function openaiFetch(p, path, { method = 'GET', body, signal } = {}) {
 }
 
 function openaiChat(p, { model, system, user, maxTokens, temperature, tools, signal }) {
+  const noTempKey = `openai:${model}`;
   const messages = [...(system ? [{ role: 'system', content: system }] : []), { role: 'user', content: user }];
   return {
     async next() {
-      const data = await openaiFetch(p, '/chat/completions', {
-        method: 'POST', signal,
-        body: {
-          model, messages, max_tokens: maxTokens,
-          ...(Number.isFinite(temperature) ? { temperature } : {}),
-          ...(tools.length ? { tools: tools.map(t => ({ type: 'function', function: { name: t.def.name, description: t.def.description, parameters: t.def.input_schema } })) } : {}),
-        },
-      });
+      let data;
+      for (;;) {
+        try {
+          data = await openaiFetch(p, '/chat/completions', {
+            method: 'POST', signal,
+            body: {
+              model, messages, max_tokens: maxTokens,
+              ...(Number.isFinite(temperature) && !noTemperature.has(noTempKey) ? { temperature } : {}),
+              ...(tools.length ? { tools: tools.map(t => ({ type: 'function', function: { name: t.def.name, description: t.def.description, parameters: t.def.input_schema } })) } : {}),
+            },
+          });
+          break;
+        } catch (e) {
+          if (e?.name === 'AbortError' || signal?.aborted) throw e;
+          if (Number.isFinite(temperature) && !noTemperature.has(noTempKey) && isDeprecatedTemp(e?.status, e?.message)) {
+            noTemperature.add(noTempKey);
+            continue;
+          }
+          throw e;
+        }
+      }
       const c = data?.choices?.[0] || {};
       const msg = c.message || {};
       const calls = (msg.tool_calls || []).map(t => {
@@ -163,7 +202,7 @@ export async function listModels(p, { signal } = {}) {
     return (d?.data || []).map(m => m.id).sort();
   }
   const { baseUrl, key } = p.secret();
-  const r = await fetch(`${baseUrl}/v1/models?limit=1000`, { signal, headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' } });
+  const r = await fetch(`${baseUrl}/v1/models?limit=1000`, { signal, headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', ...opencodeHeaders(baseUrl) } });
   if (!r.ok) throw apiError(r.status, clip(await r.text()));
   return ((await r.json())?.data || []).map(m => m.id).sort();
 }

@@ -27,7 +27,7 @@ export const DEF = {
   webhook: { method: 'POST', path: '/mi-ruta', auth: 'Ninguna', respond: 'Inmediato' },
   cron: { expr: '0 8 * * 1-5', tz: 'Europe/Madrid' },
   event: { topic: 'mi.evento' },
-  agent: { agentId: '', extraPrompt: '', provider: '', model: '', prompt: '', input: '', output: 'Texto', schema: '', tools: '', approveTools: 'Sí', maxTurns: '', temperature: '', maxTokens: '2048', mockOutput: '', mockTools: '' },
+  agent: { agentId: '', extraPrompt: '', overrideProvider: '', overrideModel: '', provider: '', model: '', prompt: '', input: '', output: 'Texto', schema: '', tools: '', approveTools: 'Sí', maxTurns: '', temperature: '', maxTokens: '2048', mockOutput: '', mockTools: '' },
   node: { code: '// $json contiene la salida del nodo anterior\nreturn { ...$json, procesado: true };' },
   http: { method: 'GET', url: 'https://', headers: '', body: '', failOnError: 'Sí' },
   db: { conn: '', query: 'SELECT 1 AS ok;', params: '' },

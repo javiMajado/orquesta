@@ -53,6 +53,17 @@ test('editar el agente cambia los nodos que lo usan en la siguiente ejecución',
   assert.deepEqual(await run(reg, [t, ag], [edge(t, ag)]).done, { prompt: 'Nuevo prompt' });
 });
 
+test('el nodo puede cambiar el modelo del agente sin modificarlo', () => {
+  const a = A.createAgent({ ...BASE, name: 'Con modelo', config: { ...BASE.config, provider: 'anthropic', model: 'claude-sonnet-5-5' } });
+  const P = params => A.applyAgent({ agentId: a.id, ...params }).params;
+  assert.deepEqual([P({}).provider, P({}).model], ['anthropic', 'claude-sonnet-5-5']);
+  assert.deepEqual([P({ overrideModel: 'claude-opus-5-5' }).provider, P({ overrideModel: 'claude-opus-5-5' }).model], ['anthropic', 'claude-opus-5-5']);
+  assert.deepEqual([P({ overrideProvider: 'mock' }).provider, P({ overrideProvider: 'mock' }).model], ['mock', ''], 'otro proveedor sin modelo: el suyo por defecto');
+  assert.equal(P({ overrideProvider: 'anthropic' }).model, 'claude-sonnet-5-5', 'mismo proveedor: conserva el modelo del agente');
+  assert.equal(P({ overrideModel: 'x' }).overrideModel, undefined);
+  assert.equal(A.listAgents().find(x => x.id === a.id).config.model, 'claude-sonnet-5-5');
+});
+
 test('si el agente ya no existe, el nodo falla sin llamar a ningún worker', async () => {
   const reg = new FakeRegistry(() => ({ output: {} }));
   const t = node('webhook'), ag = node('agent', { agentId: 'ag_borrado' }, { retries: '2' });

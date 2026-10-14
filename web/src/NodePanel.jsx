@@ -146,6 +146,59 @@ const AGENT_KEYS = ['provider', 'model', 'prompt', 'output', 'schema', 'tools', 
 // Con agente elegido, estos campos los pone el agente y no se muestran en el nodo
 const FROM_AGENT = ['prompt', 'output', 'schema', 'tools', 'approveTools', 'maxTurns', 'temperature', 'maxTokens'];
 
+// Misma regla que applyAgent (server/src/agents.js): proveedor y modelo del agente con el cambio del nodo
+const withOverride = (c, p) => {
+  const prov = p.overrideProvider || '', model = p.overrideModel || '';
+  const changed = prov && prov !== c.provider;
+  return { provider: changed ? prov : c.provider, model: model || (changed ? '' : c.model) };
+};
+
+// Con agente guardado: cambiar su proveedor/modelo solo en este nodo (el agente no se modifica)
+function AgentModelOverride({ node, agent, llm, set }) {
+  const [models, setModels] = useState({});
+  const [err, setErr] = useState('');
+  const p = node.params, c = agent.config || {};
+  const base = effectiveLlm(c, llm);
+  const eff = effectiveLlm(withOverride(c, p), llm);
+  const overridden = !!(p.overrideProvider || p.overrideModel);
+  const loadModels = () => {
+    if (!eff.info?.enabled || models[eff.provider]) return;
+    api(`/llm/models?provider=${encodeURIComponent(eff.provider)}`)
+      .then(r => setModels(m => ({ ...m, [eff.provider]: r.models })))
+      .catch(e => setErr(`No se pudieron listar los modelos: ${e.message}`));
+  };
+  const tone = llmTone(eff.info);
+  return (
+    <>
+      <div className="section-rule"><span className="eyebrow">Modelo en este nodo</span><span className="rule" /></div>
+      <div className="field">
+        <label>Proveedor LLM</label>
+        <select className="input" value={p.overrideProvider || ''} onChange={e => { setErr(''); set({ overrideProvider: e.target.value, overrideModel: '' }); }}>
+          <option value="">Del agente ({base.info?.label || base.provider})</option>
+          {(llm?.providers || []).map(x => <option key={x.id} value={x.id}>{x.label}{x.enabled ? '' : ' · desactivado'}</option>)}
+          {p.overrideProvider && llm && !llm.providers.some(x => x.id === p.overrideProvider) && <option value={p.overrideProvider}>{p.overrideProvider} · no conectado</option>}
+        </select>
+      </div>
+      <div className="field">
+        <label>Modelo</label>
+        <input className="input mono" list={`ov-models-${node.id}`} value={p.overrideModel || ''} placeholder={eff.model || 'elige un modelo'} onFocus={loadModels} onChange={e => set({ overrideModel: e.target.value })} />
+        <datalist id={`ov-models-${node.id}`}>{(models[eff.provider] || []).map(m => <option key={m} value={m} />)}</datalist>
+        <small className="help">Vacío = {eff.model || '—'}{p.overrideProvider ? '' : ' (el del agente)'}. Solo cambia en este nodo; el agente guardado no se modifica.</small>
+      </div>
+      <div className={`llm-box ${tone}`}>
+        <i className={`ph ${tone === 'err' ? 'ph-warning-circle' : 'ph-key'}`} />
+        <div>
+          <b>Esta ejecución usará: {eff.info?.label || eff.provider} · {eff.model || '¿modelo?'}</b>
+          <span>{eff.info?.host ? `${eff.info.host} · ` : ''}{keyText(eff.info)}</span>
+          {eff.info && !eff.info.enabled && <span>{eff.info.reason}</span>}
+        </div>
+      </div>
+      {overridden && <div className="picker-row"><button type="button" className="btn btn-secondary btn-sm" onClick={() => set({ overrideProvider: '', overrideModel: '' })}><i className="ph ph-arrow-counter-clockwise" />Usar el del agente</button></div>}
+      {err && <small className="help" style={{ color: 'var(--err)' }}>{err}</small>}
+    </>
+  );
+}
+
 // «Agente»: personalizado (configurado en el nodo) o uno guardado en la pantalla Agentes
 function AgentPicker({ node, onNode, workers, onLeave }) {
   const [list, setList] = useState(null);
@@ -162,10 +215,10 @@ function AgentPicker({ node, onNode, workers, onLeave }) {
   const set = patch => onNode({ params: { ...p, ...patch } });
   const go = href => (onLeave ? onLeave(href) : (location.hash = href));
   const renameTo = a => (a && (node.name === TYPES.agent.label || node.name === cur?.name) ? { name: a.name } : {});
-  const choose = id => onNode({ params: { ...p, agentId: id }, ...renameTo(list?.find(a => a.id === id)) });
+  const choose = id => onNode({ params: { ...p, agentId: id, overrideProvider: '', overrideModel: '' }, ...renameTo(list?.find(a => a.id === id)) });
 
-  // Desvincular: copia la configuración del agente al nodo para seguir editándola aquí
-  const unlink = () => set({ ...cur.config, agentId: '', extraPrompt: '', prompt: [cur.config.prompt, p.extraPrompt].filter(Boolean).join('\n\n') });
+  // Desvincular: copia la configuración del agente (con el modelo cambiado en el nodo) para seguir editándola aquí
+  const unlink = () => set({ ...cur.config, ...withOverride(cur.config, p), agentId: '', extraPrompt: '', overrideProvider: '', overrideModel: '', prompt: [cur.config.prompt, p.extraPrompt].filter(Boolean).join('\n\n') });
   const startSave = () => { setMsg(''); setDraft({ name: node.name === TYPES.agent.label ? '' : node.name, description: '' }); };
   const saveAs = async () => {
     if (!draft.name.trim()) { setMsg('Ponle un nombre al agente.'); return; }
@@ -196,6 +249,7 @@ function AgentPicker({ node, onNode, workers, onLeave }) {
           <button type="button" className="btn btn-icon btn-xs" onClick={unlink} title="Desvincular: copia la configuración al nodo y deja de usar el agente"><i className="ph ph-link-break" /></button>
         </>} />
       )}
+      {cur && <AgentModelOverride node={node} agent={cur} llm={llm} set={set} />}
       {p.agentId && list && !cur && <small className="help" style={{ color: 'var(--err)' }}>Este agente se ha eliminado: elige otro o vuelve a «Personalizado».</small>}
       {!p.agentId && !draft && <div className="picker-row"><button type="button" className="btn btn-secondary btn-sm" onClick={startSave} title="Guarda la configuración de este nodo como un agente reutilizable"><i className="ph ph-floppy-disk" />Guardar como agente</button></div>}
       {!p.agentId && draft && (

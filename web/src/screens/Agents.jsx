@@ -4,7 +4,7 @@ import { DEF, FIELDS } from '../nodeTypes.js';
 import { LlmFields, Field, AgentCard } from '../NodePanel.jsx';
 
 // Configuración que guarda un agente (la entrada la pone cada nodo)
-const { input, agentId, extraPrompt, ...AGENT_DEF } = DEF.agent;
+const { input, agentId, extraPrompt, overrideProvider, overrideModel, ...AGENT_DEF } = DEF.agent;
 export const EMPTY_AGENT = { name: '', description: '', config: AGENT_DEF };
 const AGENT_FIELDS = FIELDS.agent.filter(f => f[0] !== 'input');
 
