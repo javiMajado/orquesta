@@ -11,6 +11,14 @@ const pools = new Map();
 const fail = msg => Object.assign(new Error(msg), { retryable: false });
 const BASE = () => process.env.ORQ_BASE_DIR || fileURLToPath(new URL('../../..', import.meta.url));
 
+// Limpia escapes innecesarios en SQL: \" → ", \` → `, \' → '
+function sanitizeSql(sql) {
+  return String(sql || '')
+    .replace(/\\"([^"]*)\"/g, '"$1"')  // \"column\" → "column"
+    .replace(/\\`([^`]*)`/g, '`$1`')      // \`column` → `column`
+    .replace(/\\'/g, "'");                 // \' → '
+}
+
 function envConnection(ref) {
   const name = String(ref || '').replace(/^env:/, '');
   if (!name) throw fail('Elige una conexión en el nodo');
@@ -103,12 +111,13 @@ async function runSqlite(c, sql, values, log) {
 export default async function db(p, _input, { log }) {
   const c = p.connection || envConnection(p.conn);
   if (!p.query || !String(p.query).trim()) throw fail('La consulta está vacía');
+  const query = sanitizeSql(p.query);
   let values = p.params;
   if (typeof values === 'string') {
     try { values = values.trim() ? JSON.parse(values) : []; } catch { throw fail('«Parámetros» debe ser un array JSON, p. ej. ["a@b.com", 3]'); }
   }
   if (!Array.isArray(values)) values = values == null ? [] : [values];
-  if (c.driver === 'pg') return runPg(c, p.query, values, log);
-  if (c.driver === 'sqlite') return runSqlite(c, p.query, values, log);
+  if (c.driver === 'pg') return runPg(c, query, values, log);
+  if (c.driver === 'sqlite') return runSqlite(c, query, values, log);
   throw fail(`Driver no soportado: ${c.driver} (usa "pg" o "sqlite")`);
 }

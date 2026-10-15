@@ -34,7 +34,7 @@ export class Engine extends EventEmitter {
   // stopAt: «ejecutar hasta aquí». Solo se ejecutan ese nodo y los que llevan hasta él; las demás ramas
   // no se lanzan y los bucles hacen solo su primer elemento. La salida de la ejecución es la de ese nodo.
   // parentStep: { stepId, stepEvt } del nodo Sub-workflow que lanza esta ejecución (para reflejar en él sus esperas)
-  start(workflowId, { mode = 'manual', input = {}, triggerNodeId, parentRunId, parentStep, stopAt } = {}) {
+  start(workflowId, { mode = 'manual', input = {}, triggerNodeId, parentRunId, parentStep, stopAt, caseId, batchId } = {}) {
     const wf = Workflows.get(workflowId);
     if (!wf) throw Object.assign(new Error('Workflow no encontrado'), { status: 404 });
     const g = { nodes: [], edges: [], ...(wf.graph || {}) };
@@ -51,7 +51,7 @@ export class Engine extends EventEmitter {
       : g.nodes.find(n => TRIGGERS.includes(n.type) && (!only || only.has(n.id)));
     if (!trig) throw new Error(only ? 'Ese nodo no está conectado a ningún disparador' : 'El workflow no tiene ningún disparador');
 
-    const run = Runs.create({ workflowId: wf.id, workflowName: wf.name, mode, input, parentRunId });
+    const run = Runs.create({ workflowId: wf.id, workflowName: wf.name, mode, input, parentRunId, caseId, batchId });
     const ctx = {
       runId: run.id, wf, g, byId: Object.fromEntries(g.nodes.map(n => [n.id, n])),
       byName: {}, tokens: 0, cancelled: false, approvals: new Map(), merges: new Map(), timers: new Set(), children: [],

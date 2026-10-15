@@ -5,10 +5,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { Workflows, Runs, Steps, Logs, Settings } from './db.js';
+import { Workflows, Runs, Steps, Logs, Settings, Datasets, Batches } from './db.js';
 import { Registry } from './registry.js';
 import { Engine } from './engine.js';
 import { createTriggers } from './triggers.js';
+import { createDatasets } from './datasets.js';
 import { seedIfEmpty } from './seed.js';
 import { makePolicy } from './security.js';
 import { resolveLlm, llmDefault } from './llm.js';
@@ -19,6 +20,7 @@ import { listSchedules } from './schedules.js';
 import { listConnections, createConnection, updateConnection, deleteConnection, resolveForWorker, payloadForTest } from './connections.js';
 
 Runs.markInterrupted();
+Batches.markInterrupted();
 seedIfEmpty();
 
 const app = express();
@@ -44,7 +46,15 @@ const wrap = fn => async (req, res) => {
 const must = (v, msg = 'No encontrado') => { if (!v) throw Object.assign(new Error(msg), { status: 404 }); return v; };
 const pick = (o, keys) => Object.fromEntries(keys.filter(k => o?.[k] !== undefined).map(k => [k, o[k]]));
 
-const triggers = createTriggers({ app, api, engine });
+const triggers = createTriggers({ app, api, engine, hooks: {
+  isListening: id => datasets.isListening(id),
+  onWebhook: (...a) => datasets.onWebhook(...a),
+  validateWebhook: (...a) => datasets.validateWebhook(...a),
+} });
+const datasets = createDatasets({ engine, registry, broadcast: m => broadcast(m) });
+// Workflows con los antiguos «Datos de prueba (JSON)» → campos de entrada + conjunto «Por defecto»
+const migrated = datasets.migrateAll();
+if (migrated) console.log(`Datos de prueba migrados a casos en ${migrated} workflow${migrated === 1 ? '' : 's'}`);
 mountMockJira(app);
 // URL del propio Orquesta para expresiones y scripts ($env.ORQ_SELF_URL): p. ej. el Jira simulado
 process.env.ORQ_SELF_URL = `http://127.0.0.1:${env.PORT}`;
@@ -57,6 +67,8 @@ api.get('/workflows', wrap(() => {
 }));
 api.post('/workflows', wrap(req => {
   const w = Workflows.create(pick(req.body, ['name', 'description', 'collection', 'active', 'graph']));
+  // Importado con el formato antiguo (graph.settings.testInput)
+  if (datasets.migrateOne(w)) Object.assign(w, Workflows.get(w.id));
   triggers.sync();
   return w;
 }));
@@ -67,12 +79,34 @@ api.put('/workflows/:id', wrap(req => {
   broadcast({ type: 'workflow', workflow: w });
   return w;
 }));
-api.delete('/workflows/:id', wrap(req => { must(Workflows.remove(req.params.id)); triggers.sync(); return { ok: true }; }));
+api.delete('/workflows/:id', wrap(req => { must(Workflows.remove(req.params.id)); Datasets.removeByWorkflow(req.params.id); datasets.stopListening(req.params.id, false); triggers.sync(); return { ok: true }; }));
+// caseId: ejecuta un caso guardado (values = borrador del panel, opcional). Sin caseId: { input } tal cual.
 api.post('/workflows/:id/run', wrap(req => {
   const stopAt = req.body?.stopAt ? String(req.body.stopAt) : undefined;
+  if (req.body?.caseId) {
+    const { runId } = datasets.runCase(String(req.body.caseId), { stopAt, values: req.body.values });
+    return { runId };
+  }
   const { runId } = engine.start(req.params.id, { mode: stopAt ? 'hasta-aqui' : 'manual', input: req.body?.input ?? {}, triggerNodeId: req.body?.triggerNodeId, stopAt });
   return { runId };
 }));
+
+// Conjuntos de datos y casos de prueba
+api.get('/workflows/:id/datasets', wrap(req => datasets.list(req.params.id)));
+api.post('/workflows/:id/datasets', wrap(req => datasets.createDataset(req.params.id, pick(req.body, ['name', 'common']))));
+api.put('/datasets/:id', wrap(req => datasets.updateDataset(req.params.id, pick(req.body, ['name', 'common', 'position']))));
+api.delete('/datasets/:id', wrap(req => datasets.removeDataset(req.params.id)));
+api.post('/datasets/:id/duplicate', wrap(req => datasets.duplicateDataset(req.params.id)));
+api.post('/datasets/:id/cases', wrap(req => datasets.createCase(req.params.id, pick(req.body, ['name', 'values', 'removed', 'expect', 'expectError']))));
+api.put('/cases/:id', wrap(req => datasets.updateCase(req.params.id, pick(req.body, ['name', 'values', 'removed', 'expect', 'expectError', 'position']))));
+api.delete('/cases/:id', wrap(req => datasets.removeCase(req.params.id)));
+api.post('/datasets/:id/run', wrap(req => datasets.runBatch(req.params.id, { caseIds: req.body?.caseIds })));
+api.get('/batches/:id', wrap(req => datasets.getBatch(req.params.id)));
+api.post('/datasets/:id/generate', wrap(req => datasets.generate(req.params.id, pick(req.body, ['mode', 'count', 'prompt']))));
+api.post('/datasets/:id/import', wrap(req => datasets.importData(req.params.id, { text: typeof req.body === 'string' ? req.body : req.body?.text, format: req.body?.format })));
+api.post('/workflows/:id/listen', wrap(req => datasets.listen(req.params.id)));
+api.delete('/workflows/:id/listen', wrap(req => datasets.stopListening(req.params.id)));
+api.post('/runs/:id/save-as-case', wrap(req => datasets.saveRunAsCase(req.params.id, pick(req.body, ['datasetId', 'name']))));
 
 api.get('/runs', wrap(req => Runs.list({ workflowId: req.query.workflowId, status: req.query.status, limit: Math.min(500, Number(req.query.limit) || 100) })));
 api.get('/runs/:id', wrap(req => {

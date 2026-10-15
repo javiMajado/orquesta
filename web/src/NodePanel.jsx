@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { TYPES, FIELDS, CAPS, tileClass } from './nodeTypes.js';
+import { TYPES, FIELDS, CAPS, TRIGGERS, tileClass } from './nodeTypes.js';
+import InputFields from './InputFields.jsx';
 import { api, pretty } from './api.js';
 import { DataPicker, AutoHint } from './DataPicker.jsx';
 import Trace from './Trace.jsx';
@@ -348,11 +349,12 @@ export function Field({ f, value, onChange, workflows = [], onFocus }) {
 // Campos donde se rellena solo con el texto del nodo anterior si se dejan vacíos
 const AUTO = { agent: 'input', file: 'content', email: 'body' };
 
-export default function NodePanel({ node, step, workers, workflows, wf, graph, steps = {}, running, onRunUntil, runId, traceRefresh, sideTab = 'wf', onSideTab, onSelectNode, onLeave, onWf, onSettings, onNode, onDelete, onClose, onDecide }) {
+export default function NodePanel({ node, step, workers, workflows, wf, graph, steps = {}, running, onRunUntil, runId, traceRefresh, sideTab = 'wf', onSideTab, onSelectNode, onLeave, onWf, onSettings, onNode, onDelete, onClose, onDecide,
+  testInput, testLabel, analysis, inputIssues, onDeclare, onIgnore, onOpenRun, triggerName }) {
   const [tab, setTab] = useState('params');
   const focus = useRef(null); // { nodeId, key, el }: último campo de texto con el cursor
   const [pickMsg, setPickMsg] = useState('');
-  useEffect(() => { setPickMsg(''); }, [node?.id]);
+  useEffect(() => { setPickMsg(''); setTab(t => (t === 'inputs' && !TRIGGERS.includes(node?.type) ? 'params' : t)); }, [node?.id]);
 
   if (!node) {
     return (
@@ -379,10 +381,13 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
             <datalist id="wf-collections">{[...new Set(workflows.map(w => w.collection).filter(Boolean))].map(c => <option key={c} value={c} />)}</datalist>
             <small className="help">Agrupa los workflows en la lista. Escribe una nueva o elige una existente.</small>
           </div>
-          <div className="field">
-            <label>Datos de prueba (JSON)</label>
-            <textarea className="input mono" rows={9} spellCheck={false} value={graph.settings?.testInput || ''} onChange={e => onSettings({ testInput: e.target.value })} placeholder='{ "body": { … } }' />
-            <small className="help">Entrada del disparador al pulsar «Ejecutar». Los webhooks reciben {'{ body, query, headers, method }'}.</small>
+          <div className="llm-box">
+            <i className="ph ph-flask" />
+            <div>
+              <b>Datos de prueba</b>
+              <span>Se eligen en el panel «Ejecutar»: formulario generado con los campos de entrada del disparador, casos guardados y conjuntos de datos.</span>
+              {onOpenRun && <button type="button" className="link-btn" style={{ alignSelf: 'flex-start', marginTop: 4 }} onClick={onOpenRun}>Abrir el panel de ejecución</button>}
+            </div>
           </div>
           <div className="stats"><span><b>{graph.nodes.length}</b> nodos</span><span><b>{graph.edges.length}</b> conexiones</span></div>
           <span className="eyebrow" style={{ marginTop: 8 }}>Atajos</span>
@@ -438,12 +443,26 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
         </div>
         <div className="tabs">
           <button className={tab === 'params' ? 'on' : ''} onClick={() => setTab('params')}>Parámetros</button>
+          {TRIGGERS.includes(node.type) && <button className={tab === 'inputs' ? 'on' : ''} onClick={() => setTab('inputs')}>Campos de entrada{analysis?.undeclared?.length > 0 && <span className="tab-dot warn" />}</button>}
           <button className={tab === 'out' ? 'on' : ''} onClick={() => setTab('out')}>Salida{hasOut && <span className="tab-dot" />}</button>
           {onRunUntil && <button className="run-until" disabled={running} onClick={() => { onRunUntil(node.id); setTab('out'); }}
-            title="Ejecuta el flujo con los Datos de prueba solo hasta este nodo (incluido): lo de después no se ejecuta"><i className="ph ph-play" />Ejecutar hasta aquí</button>}
+            title="Ejecuta el flujo con el caso de prueba activo solo hasta este nodo (incluido): lo de después no se ejecuta"><i className="ph ph-play" />Ejecutar hasta aquí</button>}
         </div>
       </div>
       <div className="panel-scroll">
+        {inputIssues?.length > 0 && (
+          <div className="llm-box warn">
+            <i className="ph-fill ph-warning" />
+            <div>
+              <b>Campo{inputIssues.length > 1 ? 's' : ''} no declarado{inputIssues.length > 1 ? 's' : ''}</b>
+              <span>Este nodo usa {inputIssues.map((u, i) => <Fragment key={u.path}>{i ? ', ' : ''}<span className="mono">{u.path}</span></Fragment>)}, que no está{inputIssues.length > 1 ? 'n' : ''} en la entrada de «{triggerName}».</span>
+              <div className="row" style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <button type="button" className="btn btn-primary btn-xs-text" onClick={() => inputIssues.forEach(u => onDeclare?.({ key: u.key, path: u.path, type: /email/i.test(u.key) ? 'email' : 'text', required: true, help: '' }))}>Añadir a la entrada</button>
+                <button type="button" className="btn btn-ghost btn-xs-text" onClick={() => inputIssues.forEach(u => onIgnore?.(u.path))}>Ignorar</button>
+              </div>
+            </div>
+          </div>
+        )}
         {step?.status === 'waiting' && node.type === 'subflow' && step.childRunId && (
           <div className="approval-card">
             <b>El sub-workflow espera una aprobación</b>
@@ -459,7 +478,9 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
             <DecisionButtons meta={step.meta} onDecide={onDecide} />
           </div>
         )}
-        {tab === 'params' ? (
+        {tab === 'inputs' && TRIGGERS.includes(node.type) ? (
+          <InputFields node={node} onNode={onNode} analysis={analysis} byId={Object.fromEntries(graph.nodes.map(n => [n.id, n]))} />
+        ) : tab === 'params' ? (
           <>
             {hookUrl && (
               <div className="field">
@@ -488,10 +509,10 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
                     ? <ConnSelect value={node.params[f[0]]} onChange={setParam} />
                     : <Field f={f} value={node.params[f[0]]} onChange={setParam} workflows={workflows} onFocus={onFocusField} />}
                   {node.type === 'file' && f[0] === 'path' && <FilePicker node={node} setParam={setParam} />}
-                  {AUTO[node.type] === f[0] && <AutoHint node={node} graph={graph} steps={steps} testInput={graph.settings?.testInput} value={node.params[f[0]]} />}
+                  {AUTO[node.type] === f[0] && <AutoHint node={node} graph={graph} steps={steps} testInput={testInput} value={node.params[f[0]]} />}
                 </Fragment>
               ))}
-            <DataPicker node={node} graph={graph} steps={steps} testInput={graph.settings?.testInput} onPick={pick} onRunUntil={running ? null : onRunUntil} />
+            <DataPicker node={node} graph={graph} steps={steps} testInput={testInput} testLabel={testLabel} onPick={pick} onRunUntil={running ? null : onRunUntil} />
             {pickMsg && <small className="help pick-msg">{pickMsg}</small>}
             <div className="section-rule"><span className="eyebrow">Ejecución</span><span className="rule" /></div>
             <div className="kv"><span>Capacidad requerida</span><span className="tag tag-accent mono">{CAP_LABEL[cap] || cap}</span></div>

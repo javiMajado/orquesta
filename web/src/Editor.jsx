@@ -3,6 +3,9 @@ import { api, dur, STATUS } from './api.js';
 import { TYPES, GROUPS, TRIGGERS, NW, NH, outPorts, portY, tileClass, newNode } from './nodeTypes.js';
 import NodePanel, { DecisionButtons } from './NodePanel.jsx';
 import { decide as decideIn, pendingIn } from './Trace.jsx';
+import RunPanel from './RunPanel.jsx';
+import { useDatasets, readActive, writeActive } from './runData.js';
+import { triggerOf, fieldsOf, analyzeInputs, effectiveValues, buildTriggerInput, validateInput } from '@orquesta/shared/inputs';
 
 const curve = (x1, y1, x2, y2) => {
   const dx = Math.max(50, Math.abs(x2 - x1) / 2);
@@ -46,6 +49,14 @@ export default function Editor({ id, workers, subscribe }) {
   const [run, setRunState] = useState(null);
   const [allWfs, setAllWfs] = useState([]);
   const [, tick] = useState(0);
+  // Panel de ejecución: conjunto y caso activos, borrador de valores y aviso previo a ejecutar
+  const { data: dsData, reload: reloadDs } = useDatasets(id, subscribe);
+  const [activeDsId, setActiveDsIdState] = useState(() => readActive(id));
+  const [selCaseId, setSelCaseId] = useState(null);
+  const [draft, setDraft] = useState(null); // { caseId, values }
+  const [runWarn, setRunWarn] = useState(null);
+  const [agentCfg, setAgentCfg] = useState({});
+  const setActiveDsId = v => { setActiveDsIdState(v); writeActive(id, v); };
 
   const cv = useRef(null), drag = useRef(null), viewRef = useRef(view), runRef = useRef(null), logEl = useRef(null), graphRef = useRef(graph);
   viewRef.current = view;
@@ -182,6 +193,8 @@ export default function Editor({ id, workers, subscribe }) {
   useEffect(() => {
     const key = e => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && runOpen) { e.preventDefault(); if (!active) runNow(); return; }
+      if (e.key === 'Escape' && runOpen && !e.defaultPrevented) { setSideTab('wf'); return; }
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
       if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSel(); }
       if (e.key === 'Escape') { setSel(null); setSelEdge(null); }
@@ -212,15 +225,49 @@ export default function Editor({ id, workers, subscribe }) {
     edit(g => ({ ...g, edges: [...g.edges, { id: 'e' + Date.now().toString(36), from: l.from, to, port: l.port }] }));
   };
 
-  // stopAt: id de nodo para «ejecutar hasta aquí» (solo ese nodo y los anteriores)
-  const runNow = async stopAt => {
+  // ── Datos de prueba: disparador, campos, conjunto/caso activos y valores que se usarán ──
+  const trigger = useMemo(() => triggerOf(graph), [graph]);
+  const fields = fieldsOf(trigger);
+  const datasets = dsData?.datasets || [];
+  const activeDs = datasets.find(d => d.id === activeDsId) || datasets[0] || null;
+  const selCase = activeDs?.cases.find(c => c.id === selCaseId) || activeDs?.cases[0] || null;
+  const savedValues = useMemo(() => (selCase ? effectiveValues(activeDs, selCase)
+    : Object.fromEntries(fields.filter(f => f.default !== undefined && f.default !== '').map(f => [f.key, f.default]))), [activeDs, selCase, JSON.stringify(fields)]);
+  const draftOn = draft && draft.caseId === (selCase?.id || null);
+  const values = draftOn ? draft.values : savedValues;
+  const draftDirty = !!draftOn && JSON.stringify(draft.values) !== JSON.stringify(savedValues);
+  const setValues = v => { setDraft({ caseId: selCase?.id || null, values: v }); setRunWarn(null); };
+  const testInput = useMemo(() => (trigger ? JSON.stringify(buildTriggerInput(trigger, fields, values)) : ''), [trigger, values, JSON.stringify(fields)]);
+  useEffect(() => { api('/agents').then(l => setAgentCfg(Object.fromEntries(l.map(a => [a.id, a.config || {}])))).catch(() => {}); }, []);
+  const analysis = useMemo(() => analyzeInputs(graph, trigger?.id, { agents: agentCfg }), [graph, trigger?.id, agentCfg]);
+  const issuesByNode = useMemo(() => {
+    const m = {};
+    for (const u of analysis.undeclared) for (const nid of u.nodes) (m[nid] ||= []).push(u);
+    return m;
+  }, [analysis]);
+  const editTrigger = patch => trigger && edit(g => ({ ...g, nodes: g.nodes.map(n => (n.id === trigger.id ? { ...n, params: { ...n.params, ...patch(n.params) } } : n)) }));
+  const declareField = f => editTrigger(p => ({ inputFields: [...(p.inputFields || []).filter(x => x.path !== f.path), f] }));
+  const ignoreInput = path => editTrigger(p => ({ ignoredInputs: [...new Set([...(p.ignoredInputs || []), path])] }));
+  const runOpen = sideTab === 'run' && !sel;
+  const openRun = () => { setSel(null); setSelEdge(null); setSideTab('run'); };
+  // Una llamada capturada en modo escucha: se selecciona su caso
+  useEffect(() => subscribe(m => {
+    if (m.type === 'capture' && m.workflowId === id) { setActiveDsId(m.datasetId); setSelCaseId(m.caseId); }
+  }), [id, subscribe]);
+
+  // stopAt: id de nodo para «ejecutar hasta aquí» (solo ese nodo y los anteriores).
+  // opts.caseId + saved: ejecuta ese caso con sus valores guardados (lista de Casos) · opts.force: sin validar
+  const runNow = async (stopAt, opts = {}) => {
+    const caseId = opts.caseId || selCase?.id || null;
+    const vals = opts.saved ? effectiveValues(activeDs, activeDs?.cases.find(c => c.id === caseId)) : values;
+    const errors = opts.force ? [] : validateInput(fields, vals);
+    if (errors.length) { setRunWarn({ errors }); openRun(); return; }
+    setRunWarn(null);
     if (dirty && !(await save())) return;
-    let input = {};
-    const t = graph.settings?.testInput;
-    if (t && t.trim()) { try { input = JSON.parse(t); } catch { setErr('Los datos de prueba no son JSON válido'); return; } }
     setLogsOpen(true); setErr('');
     try {
-      const { runId } = await api(`/workflows/${id}/run`, { method: 'POST', body: { input, ...(stopAt ? { stopAt } : {}) } });
+      const body = caseId ? { caseId, ...(opts.saved ? {} : { values: vals }) } : { input: trigger ? buildTriggerInput(trigger, fields, vals) : {} };
+      const { runId } = await api(`/workflows/${id}/run`, { method: 'POST', body: { ...body, ...(stopAt ? { stopAt } : {}) } });
       if (runRef.current?.id !== runId) setRun({ id: runId, status: 'running', steps: {}, logs: [] });
     } catch (e) { setErr(e.message); }
   };
@@ -271,7 +318,7 @@ export default function Editor({ id, workers, subscribe }) {
         <button className="btn btn-secondary btn-sm" onClick={() => save()} disabled={saving || !dirty}><i className="ph ph-floppy-disk" />Guardar</button>
         {active
           ? <button className="btn btn-secondary btn-sm" onClick={cancel}><i className="ph ph-stop" />Detener</button>
-          : <button className="btn btn-primary btn-sm" onClick={() => runNow()}><i className="ph ph-play" />Ejecutar</button>}
+          : <button className={`btn btn-primary btn-sm ${runOpen ? 'is-on' : ''}`} onClick={() => (runOpen ? runNow() : openRun())} title={runOpen ? 'Ejecutar (Ctrl + Enter)' : 'Abrir el panel de ejecución'}><i className="ph ph-play" />Ejecutar</button>}
       </header>
 
       <div className="body">
@@ -334,8 +381,10 @@ export default function Editor({ id, workers, subscribe }) {
               })()}
               {graph.nodes.map(n => {
                 const t = TYPES[n.type] || TYPES.node, s = steps[n.id], icon = s && STATUS_ICON[s.status];
+                const iss = issuesByNode[n.id];
+                const hi = sel === n.id || (runOpen && n.id === trigger?.id);
                 return (
-                  <div key={n.id} className={`node st-${s?.status || 'idle'} ${sel === n.id ? 'is-sel' : ''}`} style={{ left: n.x, top: n.y }}
+                  <div key={n.id} className={`node st-${s?.status || 'idle'} ${hi ? 'is-sel' : ''} ${iss ? 'warn-input' : ''}`} style={{ left: n.x, top: n.y }}
                     onMouseDown={e => { if (e.button !== 0) return; e.stopPropagation(); drag.current = { t: 'node', id: n.id, cx: e.clientX, cy: e.clientY, nx: n.x, ny: n.y }; setSel(n.id); setSelEdge(null); }}
                     onMouseUp={() => connect(n.id)}>
                     <div className={`tile ${tileClass(n.type)}`}><i className={`ph ${t.icon}`} /></div>
@@ -346,6 +395,17 @@ export default function Editor({ id, workers, subscribe }) {
                       <span className="node-name">{n.name}</span>
                     </div>
                     {icon && <i className={icon[0]} style={{ color: icon[1], fontSize: 17 }} />}
+                    {iss && !icon && <i className="ph-fill ph-warning node-warn" />}
+                    {iss && (
+                      <div className="inp-pop elev-md" onMouseDown={e => e.stopPropagation()} onMouseUp={e => e.stopPropagation()}>
+                        <b><i className="ph-fill ph-warning" />Campo{iss.length > 1 ? 's' : ''} no declarado{iss.length > 1 ? 's' : ''}</b>
+                        <span>{TYPES[n.type]?.kind === 'Base de datos' ? 'La consulta usa' : 'Usa'} {iss.map((u, i) => <Fragment key={u.path}>{i ? ', ' : ''}<span className="mono">{u.path}</span></Fragment>)}, que no está{iss.length > 1 ? 'n' : ''} en la entrada de «{trigger?.name}».</span>
+                        <div className="row">
+                          <button className="btn btn-primary btn-xs-text" onClick={() => iss.forEach(u => declareField({ key: u.key, path: u.path, type: /email/i.test(u.key) ? 'email' : 'text', required: true, help: '' }))}>Añadir a la entrada</button>
+                          <button className="btn btn-ghost btn-xs-text" onClick={() => iss.forEach(u => ignoreInput(u.path))}>Ignorar</button>
+                        </div>
+                      </div>
+                    )}
                     {!TRIGGERS.includes(n.type) && <div className={`port in ${link ? 'hot' : ''}`} />}
                     {outPorts(n.type).map(p => (
                       <Fragment key={p.port}>
@@ -410,10 +470,21 @@ export default function Editor({ id, workers, subscribe }) {
           </section>
         </div>
 
-        {(selNode || window.innerWidth >= 1200) && (
+        {runOpen ? (
+          <RunPanel
+            wf={wf} graph={graph} trigger={trigger} fields={fields} analysis={analysis} data={dsData} reload={reloadDs}
+            activeDs={activeDs} selCase={selCase} values={values} setValues={setValues} dirty={draftDirty}
+            setActiveDsId={v => { setActiveDsId(v); setDraft(null); }} setSelCaseId={v => { setSelCaseId(v); setDraft(null); setRunWarn(null); }}
+            running={!!active} runWarn={runWarn} onRun={opts => runNow(undefined, opts)} onClose={() => setSideTab('wf')}
+            onDeclare={declareField} onSelectNode={nid => { setSel(nid); setSelEdge(null); }} subscribe={subscribe} onError={setErr}
+          />
+        ) : (selNode || window.innerWidth >= 1200) && (
           <NodePanel
             node={selNode} step={selNode && steps[selNode.id]} workers={workers} workflows={allWfs.filter(w => w.id !== id)}
             wf={wf} graph={graph} steps={steps} running={!!active} onRunUntil={nid => runNow(nid)}
+            testInput={testInput} testLabel={selCase ? `según el caso «${selCase.name}»` : 'según los campos de entrada'}
+            analysis={analysis} inputIssues={selNode ? issuesByNode[selNode.id] : null} onDeclare={declareField} onIgnore={ignoreInput} onOpenRun={openRun}
+            triggerName={trigger?.name}
             runId={run?.id} traceRefresh={`${run?.status}|${Object.values(steps).map(s => s.status).join()}`}
             sideTab={sideTab} onSideTab={setSideTab} onSelectNode={nid => { setSel(nid); setSelEdge(null); }}
             onLeave={async href => { if (dirty && !(await save())) return; location.hash = href; }}
