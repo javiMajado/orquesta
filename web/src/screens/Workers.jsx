@@ -8,7 +8,12 @@ const ICON = { llm: 'ph-robot', node: 'ph-file-js', db: 'ph-database' };
 export default function Workers({ workers }) {
   const [strategy, setStrategy] = useState('carga');
   const [err, setErr] = useState('');
-  useEffect(() => { api('/settings').then(s => setStrategy(s.strategy)).catch(e => setErr(e.message)); }, []);
+  const [cache, setCache] = useState({});
+  useEffect(() => { api('/settings').then(s => { setStrategy(s.strategy); setCache(s.llmCache || {}); }).catch(e => setErr(e.message)); }, []);
+  const pickCache = async (id, mode) => {
+    setCache(c => ({ ...c, [id]: mode }));
+    await api('/settings', { method: 'PUT', body: { llmCache: { [id]: mode } } }).then(s => setCache(s.llmCache || {})).catch(e => setErr(e.message));
+  };
 
   const pick = async v => { setStrategy(v); await api('/settings', { method: 'PUT', body: { strategy: v } }).catch(e => setErr(e.message)); };
   const toggle = w => api(`/workers/${encodeURIComponent(w.id)}`, { method: 'PATCH', body: { enabled: !w.enabled } }).catch(e => setErr(e.message));
@@ -40,11 +45,11 @@ export default function Workers({ workers }) {
           <div className="section-rule"><span className="eyebrow">Proveedores LLM</span><span className="rule" /></div>
           <span className="sub" style={{ fontSize: 12.5 }}>
             Por defecto, los agentes usan <b className="mono">{llm?.default?.provider ? `${llm.default.provider} · ${llm.default.model || 'modelo del proveedor'}` : 'el proveedor simulado (sin coste)'}</b>
-            {' '}(<span className="mono">ORQ_LLM_DEFAULT</span>). Las claves nunca salen del worker: aquí solo se ve de dónde vienen y su huella.
+            {' '}(<span className="mono">ORQ_LLM_DEFAULT</span>). Las claves nunca salen del worker: aquí solo se ve de dónde vienen y su huella. «Caché de prompts» automática: activada, y se desactiva sola si el proveedor la rechaza.
           </span>
         </div>
         <table className="table">
-          <thead><tr><th>Proveedor</th><th>Tipo</th><th>Clave</th><th>Estado</th><th>Workers</th></tr></thead>
+          <thead><tr><th>Proveedor</th><th>Tipo</th><th>Clave</th><th>Estado</th><th title="Reutiliza el principio de la conversación (herramientas, instrucciones, mapa del repositorio) en vez de pagarlo entero en cada turno">Caché de prompts</th><th>Workers</th></tr></thead>
           <tbody>
             {(llm?.providers || []).map(p => {
               const color = !p.enabled ? 'var(--err)' : p.source === 'shell' ? 'var(--warn)' : 'var(--ok)';
@@ -54,6 +59,13 @@ export default function Workers({ workers }) {
                   <td className="mono">{p.kind}</td>
                   <td className="mono" style={{ color: p.source === 'shell' ? 'var(--warn)' : undefined }}>{keyText(p)}</td>
                   <td><span className="status" style={{ color }}><span className="dot" style={{ background: color }} />{p.enabled ? (p.source === 'shell' ? 'Activo · clave del shell' : 'Activo') : 'Desactivado'}</span>{!p.enabled && <small className="help" style={{ display: 'block' }}>{p.reason}</small>}</td>
+                  <td>
+                    <select className="input input-sm" value={cache[p.id] || 'auto'} onChange={e => pickCache(p.id, e.target.value)} aria-label={`Caché de prompts de ${p.label}`}>
+                      <option value="auto">Automática</option>
+                      <option value="on">Siempre</option>
+                      <option value="off">Desactivada</option>
+                    </select>
+                  </td>
                   <td className="mono">{p.workers.join(', ')}</td>
                 </tr>
               );

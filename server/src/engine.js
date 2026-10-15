@@ -5,7 +5,7 @@ import { CAPS, TRIGGERS, ACTION_TYPES, parseDuration } from '@orquesta/shared/ty
 import { evalExpr, render, renderParams, publicEnv, mainText } from '@orquesta/shared/expr';
 import { applyOverrides } from '@orquesta/shared/overrides';
 import { notifyApproval } from './notify.js';
-import { resolveLlm } from './llm.js';
+import { resolveLlm, llmCacheMode } from './llm.js';
 import { resolveForWorker } from './connections.js';
 import { applyAgent } from './agents.js';
 import { grant, grantsForWorker } from './grants.js';
@@ -252,6 +252,9 @@ export class Engine extends EventEmitter {
       this.log(ctx, 'ok', node.name, 'cola-humana', 'Aprobado · se ejecuta con los parámetros revisados');
     }
 
+    // Caché de prompts del proveedor (pantalla Workers: auto | on | off). Tras la revisión: no es un parámetro del nodo
+    if (provider) params.promptCache = llmCacheMode(provider);
+
     // Conexión a BD dada de alta en la UI: se añade DESPUÉS de la revisión humana para que la
     // contraseña no aparezca en la tarjeta de revisión (las del .env las resuelve el worker)
     if (node.type === 'db') {
@@ -303,7 +306,9 @@ export class Engine extends EventEmitter {
   // Guarda proveedor/modelo/tokens del paso y los suma al presupuesto de la ejecución
   addMeta(ctx, stepId, stepEvt, meta) {
     if (!meta) return;
-    if (meta.usage?.total) ctx.tokens += meta.usage.total;
+    // Presupuesto en tokens ponderados por coste (lo leído de caché cuenta ~10 %); workers antiguos: total
+    const spent = meta.usage?.weighted ?? meta.usage?.total;
+    if (spent) ctx.tokens += spent;
     Steps.update(stepId, { meta });
     stepEvt({ meta });
   }

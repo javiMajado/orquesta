@@ -1,4 +1,5 @@
 import { env } from './env.js';
+import { Settings } from './db.js';
 
 // ORQ_LLM_DEFAULT = "proveedor:modelo" (el modelo puede contener ':')
 export function llmDefault() {
@@ -14,4 +15,16 @@ export function resolveLlm(params = {}, providers = []) {
   const info = providers.find(p => p.id === id) || null;
   const model = params.model || (id === def.provider ? def.model : '') || info?.defaultModel || (id === 'mock' ? 'mock' : '');
   return { provider: id, model, info, fromDefault: !params.provider };
+}
+
+// Caché de prompts por proveedor (pantalla Workers): auto (por defecto: activada, y se desactiva sola si el
+// proveedor la rechaza), on u off. Viaja con cada tarea (params.promptCache); el worker la aplica.
+export const CACHE_MODES = ['auto', 'on', 'off'];
+export const llmCache = () => Settings.get('llmCache', {}) || {};
+export const llmCacheMode = provider => (CACHE_MODES.includes(llmCache()[provider]) ? llmCache()[provider] : 'auto');
+export function setLlmCache(patch = {}) {
+  const cur = llmCache();
+  for (const [id, mode] of Object.entries(patch)) if (CACHE_MODES.includes(mode)) cur[id] = mode;
+  Settings.set('llmCache', cur);
+  return cur;
 }

@@ -90,6 +90,15 @@ export function makeAccess({ env = process.env, grants = null, requestApproval =
       return real;
     },
 
+    // Ruta real de la carpeta si ya se puede leer, o null. Nunca pide permiso (lo usa el mapa del repo)
+    async readable(p) {
+      if (!p || typeof p !== 'string' || !path.isAbsolute(p)) return null;
+      const real = await fs.realpath(path.resolve(p)).catch(() => null);
+      if (!real || !(await fs.stat(real).catch(() => null))?.isDirectory()) return null;
+      const list = await folders();
+      return list.some(g => (same(g.real, real) || inside(g.real, real)) && (g.read || g.write)) ? real : null;
+    },
+
     // Comando exacto en una carpeta. asked = se ha pedido (y concedido) permiso en esta llamada
     async command(cmd, carpeta) {
       const comando = norm(cmd);

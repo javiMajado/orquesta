@@ -1,14 +1,76 @@
+import crypto from 'node:crypto';
 import { openChat } from '../llm/clients.js';
 import { guardedFetch } from '../llm/net-guard.js';
 import { mainText } from '@orquesta/shared/expr';
 import { listFiles, readText, searchText, findFiles, checkCommand, runCommand } from '../workspace.js';
 import { makeAccess } from '../access.js';
 import { validateSchema, parseSchema } from '../llm/json-schema.js';
+import { repoMap } from '../repomap.js';
+
+// ── Salidas de las herramientas de ficheros: texto compacto en vez de JSON (menos tokens, sin escapar
+// comillas ni saltos de línea). ORQ_TOOL_OUTPUT=json vuelve al formato anterior.
+const asJson = () => process.env.ORQ_TOOL_OUTPUT === 'json';
+const out = (r, fmt) => (asJson() ? JSON.stringify(r) : fmt(r));
+
+// leer_fichero → «# ruta · líneas a-b de N · siguiente: k» y las líneas numeradas (como buscar_en_ficheros)
+export function fmtRead(r) {
+  let n = parseInt(r.lineas, 10) || 1;
+  const lines = r.texto.split('\n').map(l => (l.startsWith('(… recortado') ? l : `${n++}: ${l}`));
+  return [`# ${r.ruta} · líneas ${r.lineas}${r.siguiente ? ` · siguiente: ${r.siguiente}` : ''}`, ...lines].join('\n');
+}
+
+// buscar_en_ficheros → resumen y coincidencias agrupadas por fichero (la ruta una vez; máx. 5 por fichero)
+const PER_FILE = 5;
+export function fmtSearch(r) {
+  const head = `«${r.patron}» · ${r.coincidencias} coincidencia${r.coincidencias === 1 ? '' : 's'} en ${r.ficheros} fichero${r.ficheros === 1 ? '' : 's'} (revisados ${r.revisados})${r.aviso ? `\n${r.aviso}` : ''}`;
+  if (!r.resultados.length) return head;
+  const files = new Map(); // ruta → { lines, matches, extra, last, keep, pending }
+  for (const line of r.resultados) {
+    const m = line.match(/^(.*?)([:-])(\d+)\2 (.*)$/);
+    if (!m) continue;
+    const [, rel, sep, num, text] = m;
+    const f = files.get(rel) || files.set(rel, { lines: [], matches: 0, extra: 0, last: 0, keep: false, pending: [] }).get(rel);
+    const n = Number(num);
+    if (sep === ':') {
+      f.matches++;
+      f.keep = f.matches <= PER_FILE;
+      if (f.keep) f.lines.push(...f.pending, `  ${n}: ${text}`); else f.extra++;
+      f.pending = [];
+      f.last = n;
+    } else if (n > f.last && f.last && n <= f.last + 5 && !f.pending.length) {
+      if (f.keep) f.lines.push(`  ${n}- ${text}`); // contexto posterior de la última coincidencia
+    } else f.pending.push(`  ${n}- ${text}`); // contexto anterior de la siguiente
+  }
+  const body = [...files].map(([rel, f]) => [rel, ...f.lines, ...(f.extra ? [`  (+${f.extra} más en este fichero)`] : [])].join('\n'));
+  return [head, ...body].join('\n');
+}
+
+// listar_ficheros → árbol sangrado; si hay muchas entradas, las carpetas profundas se resumen
+export function fmtList(r, max = 300) {
+  const entries = r.entradas.map(e => {
+    const omitted = e.endsWith(' (omitida)');
+    const p = omitted ? e.slice(0, -' (omitida)'.length) : e;
+    const dir = p.endsWith('/');
+    const parts = (dir ? p.slice(0, -1) : p).split('/');
+    return { p: dir ? p.slice(0, -1) : p, depth: parts.length, name: parts.at(-1), dir, omitted };
+  });
+  const below = new Map(); // carpeta → nº de entradas dentro
+  for (const e of entries) for (let i = 1; i < e.depth; i++) { const d = e.p.split('/').slice(0, i).join('/'); below.set(d, (below.get(d) || 0) + 1); }
+  const render = limit => entries.filter(e => e.depth <= limit).map(e => `${'  '.repeat(e.depth - 1)}${e.name}${e.dir ? '/' : ''}${e.omitted ? ' (omitida)' : e.dir && e.depth === limit && below.get(e.p) ? ` (${below.get(e.p)} entradas)` : ''}`);
+  let lines = render(r.profundidad);
+  for (let d = r.profundidad - 1; d >= 1 && lines.length > max; d--) lines = render(d);
+  return [`# ${r.carpeta} · ${r.entradas.length} entradas${r.truncado ? ' (truncado)' : ''}`, ...lines.slice(0, max * 2)].join('\n');
+}
+
+// buscar_ficheros → una ruta por línea
+export const fmtFind = r => [`# «${r.patron}» en ${r.carpeta}: ${r.total} fichero${r.total === 1 ? '' : 's'}${r.truncado ? ' (truncado)' : ''}`, ...r.ficheros].join('\n');
 
 // Herramientas que un agente puede usar (campo «Herramientas», separadas por comas).
 // Por defecto ninguna. Ninguna escribe en disco. Carpetas y comandos necesitan permiso (pantalla
 // Permisos); si falta, se pide al usuario. Además, salvo «Aprobar cada comando» = No, cada
 // ejecutar_comando espera aprobación aunque el comando ya esté permitido.
+// El orden de este objeto es el que ve el modelo (y el prefijo de la caché): ejecutar_comando va al
+// final porque su descripción cambia con los comandos permitidos.
 const TOOLS = {
   http_request: {
     def: {
@@ -33,19 +95,19 @@ const TOOLS = {
   listar_ficheros: {
     def: {
       name: 'listar_ficheros',
-      description: 'Lista ficheros y carpetas (recursivo) de una carpeta permitida. Omite node_modules, .git, dist… Rutas absolutas.',
+      description: 'Lista ficheros y carpetas (recursivo) de una carpeta permitida, como árbol. Omite node_modules, .git, dist… Si te han dado el mapa del repositorio, no listes la raíz: úsalo para ir a la carpeta que te interese.',
       input_schema: {
         type: 'object',
         properties: { ruta: { type: 'string', description: 'Carpeta (ruta absoluta)' }, profundidad: { type: 'integer', description: 'Niveles a recorrer (1-8, por defecto 3)' } },
         required: ['ruta'],
       },
     },
-    run: async (args, { access }) => JSON.stringify(await listFiles(args, { access })),
+    run: async (args, { access }) => out(await listFiles(args, { access }), fmtList),
   },
   buscar_en_ficheros: {
     def: {
       name: 'buscar_en_ficheros',
-      description: 'Busca un texto (o una expresión regular) en todos los ficheros de texto de una carpeta permitida, como grep. Devuelve líneas «ruta:línea: texto». Úsala para encontrar dónde está algo antes de leer: busca los términos de la tarea (y sus equivalentes en inglés, que es como suele estar el código), los nombres de funciones, rutas de API o mensajes de error, y después lee con leer_fichero solo alrededor de esas líneas. Con regex: true, «export|csv» busca cualquiera de los dos.',
+      description: 'Busca un texto (o una expresión regular) en todos los ficheros de texto de una carpeta permitida, como grep. Devuelve las coincidencias agrupadas por fichero, con su número de línea. Úsala para encontrar dónde está algo antes de leer: busca los términos de la tarea (y sus equivalentes en inglés, que es como suele estar el código), los nombres de funciones, rutas de API o mensajes de error, y después lee con leer_fichero solo alrededor de esas líneas. Con regex: true, «export|csv» busca cualquiera de los dos.',
       input_schema: {
         type: 'object',
         properties: {
@@ -55,12 +117,12 @@ const TOOLS = {
           mayusculas: { type: 'boolean', description: 'Distinguir mayúsculas (por defecto false)' },
           incluir: { type: 'string', description: 'Solo estos ficheros, globs separados por comas (p. ej. «*.js,*.ts» o «src/**»)' },
           contexto: { type: 'integer', description: 'Líneas de contexto antes y después (0-5, por defecto 0)' },
-          maxResultados: { type: 'integer', description: 'Máximo de coincidencias (por defecto 50, máx. 200)' },
+          maxResultados: { type: 'integer', description: 'Máximo de coincidencias (por defecto 30, máx. 200)' },
         },
         required: ['ruta', 'patron'],
       },
     },
-    run: async (args, { access }) => JSON.stringify(await searchText(args, { access })),
+    run: async (args, { access }) => out(await searchText({ maxResultados: 30, ...args }, { access }), fmtSearch),
   },
   buscar_ficheros: {
     def: {
@@ -72,19 +134,23 @@ const TOOLS = {
         required: ['ruta', 'patron'],
       },
     },
-    run: async (args, { access }) => JSON.stringify(await findFiles(args, { access })),
+    run: async (args, { access }) => out(await findFiles(args, { access }), fmtFind),
   },
   leer_fichero: {
     def: {
       name: 'leer_fichero',
-      description: 'Lee un fichero de texto de una carpeta permitida, por tramos de líneas. Si hay más, la respuesta incluye «siguiente» (línea desde la que seguir). Para un resultado de buscar_en_ficheros en la línea N, lee desde unas líneas antes (p. ej. desde: N-20, lineas: 80) en vez del fichero entero.',
+      description: 'Lee un fichero de texto de una carpeta permitida, por tramos de líneas numeradas. Si hay más, la cabecera indica «siguiente» (línea desde la que seguir). Para un resultado de buscar_en_ficheros en la línea N, lee desde unas líneas antes (p. ej. desde: N-20, lineas: 80) en vez del fichero entero.',
       input_schema: {
         type: 'object',
-        properties: { ruta: { type: 'string', description: 'Fichero (ruta absoluta)' }, desde: { type: 'integer', description: 'Primera línea (por defecto 1)' }, lineas: { type: 'integer', description: 'Nº de líneas (por defecto 400, máx. 2000)' } },
+        properties: { ruta: { type: 'string', description: 'Fichero (ruta absoluta)' }, desde: { type: 'integer', description: 'Primera línea (por defecto 1)' }, lineas: { type: 'integer', description: 'Nº de líneas (por defecto 200, máx. 2000)' } },
         required: ['ruta'],
       },
     },
-    run: async (args, { access }) => JSON.stringify(await readText(args, { access })),
+    run: async (args, { access }) => out(await readText({ lineas: 200, ...args }, { access }), fmtRead),
+  },
+  fecha_actual: {
+    def: { name: 'fecha_actual', description: 'Devuelve la fecha y hora actuales en ISO 8601.', input_schema: { type: 'object', properties: {} } },
+    run: async () => new Date().toISOString(),
   },
   ejecutar_comando: {
     def: {
@@ -111,11 +177,9 @@ const TOOLS = {
       return JSON.stringify({ comando, codigo, ok, ...(error ? { error } : {}), salida });
     },
   },
-  fecha_actual: {
-    def: { name: 'fecha_actual', description: 'Devuelve la fecha y hora actuales en ISO 8601.', input_schema: { type: 'object', properties: {} } },
-    run: async () => new Date().toISOString(),
-  },
 };
+// Sin efectos ni aprobaciones: si el modelo pide varias en un turno, se ejecutan a la vez
+const READ_ONLY = new Set(['listar_ficheros', 'buscar_en_ficheros', 'buscar_ficheros', 'leer_fichero', 'fecha_actual']);
 
 function parseJson(t) {
   try { return JSON.parse(t); } catch {}
@@ -127,6 +191,35 @@ function parseJson(t) {
 // Correcciones que se piden al modelo si su JSON no cumple el esquema, antes de dar el nodo por fallido
 const MAX_FIXES = 2;
 
+// Tokens ponderados por coste (en tokens de entrada): lo leído de caché cuesta ~10 % y escribirla ~125 %.
+// Es lo que cuenta el presupuesto de la ejecución (ORQ_LLM_MAX_TOKENS_PER_RUN).
+export const weightedTokens = u => Math.round((u.input || 0) + 1.25 * (u.cacheWrite || 0) + 0.1 * (u.cacheRead || 0) + (u.output || 0));
+
+// Agentes que arrancan a la vez con el mismo prefijo (proveedor, modelo, herramientas y mapa del repo):
+// el primero precalienta la caché y los demás esperan a que acabe, para leerla en vez de pagarla entera
+// (una entrada de caché no se puede leer hasta que la primera respuesta empieza a llegar).
+const WARM_TTL = 4 * 60 * 1000;
+const warming = new Map(); // clave → { promise, until }
+export const resetWarmup = () => warming.clear(); // tests y banco de medida
+async function sharedPrefix(key, chat, log) {
+  const now = Date.now();
+  for (const [k, w] of warming) if (w.until < now) warming.delete(k);
+  const cur = warming.get(key);
+  if (cur) {
+    if (!cur.done) log('Otro agente con el mismo mapa del repositorio está preparando la caché · se espera para reutilizarla');
+    await cur.promise.catch(() => {});
+    return null;
+  }
+  const entry = { until: now + WARM_TTL, done: false };
+  let timer;
+  const timeout = new Promise(r => { timer = setTimeout(() => r(null), 30000); timer.unref?.(); });
+  entry.promise = Promise.race([chat.prewarm(), timeout]).finally(() => { entry.done = true; clearTimeout(timer); });
+  warming.set(key, entry);
+  const u = await entry.promise;
+  if (!u) warming.delete(key); // el proveedor no lo admite: que el siguiente no espere
+  return u;
+}
+
 export default async function agent(params, input, { signal, log, providers = new Map(), setMeta = () => {}, requestApproval, access = makeAccess(), open = openChat }) {
   const p = providers.get(params.provider);
   if (!p) throw Object.assign(new Error(`Este worker no tiene el proveedor LLM «${params.provider}»`), { retryable: false });
@@ -134,21 +227,37 @@ export default async function agent(params, input, { signal, log, providers = ne
   const model = params.model || p.defaultModel;
   if (!model) throw Object.assign(new Error(`Elige un modelo para el proveedor «${p.label}»`), { retryable: false });
 
-  const tools = String(params.tools || '').split(',').map(s => s.trim()).filter(Boolean).map(n => {
-    if (!TOOLS[n]) throw Object.assign(new Error(`Herramienta desconocida: ${n}. Disponibles: ${Object.keys(TOOLS).join(', ')}`), { retryable: false });
-    return TOOLS[n];
-  });
+  const wanted = new Set(String(params.tools || '').split(',').map(s => s.trim()).filter(Boolean));
+  for (const n of wanted) if (!TOOLS[n]) throw Object.assign(new Error(`Herramienta desconocida: ${n}. Disponibles: ${Object.keys(TOOLS).join(', ')}`), { retryable: false });
+  // Siempre en el orden de TOOLS, no en el que se escribieron: forman parte del prefijo de la caché
+  const tools = Object.keys(TOOLS).filter(n => wanted.has(n)).map(n => TOOLS[n]);
   // El modelo ve en la descripción qué comandos exactos puede pedir
   const cmds = access.commandList().map(c => `«${c}»`).join(', ') || '(ninguno todavía)';
   for (const [i, t] of tools.entries()) if (t === TOOLS.ejecutar_comando) tools[i] = { ...t, def: { ...t.def, description: t.def.description.replace('COMANDOS', cmds) } };
   const wantsJson = params.output === 'JSON';
   // Esquema de la respuesta (solo con salida JSON): va en las instrucciones y se comprueba al final
   const schema = wantsJson && params.schema && (typeof params.schema === 'object' || String(params.schema).trim()) ? parseSchema(params.schema) : null;
-  const system = [
+  const instructions = [
     params.prompt || '',
     wantsJson ? 'Responde ÚNICAMENTE con JSON válido, sin texto adicional ni bloques de código.' : '',
     schema ? `El JSON debe cumplir exactamente este JSON Schema (todas las propiedades obligatorias, sin añadir otras):\n${JSON.stringify(schema, null, 2)}` : '',
   ].filter(Boolean).join('\n\n');
+
+  // Mapa del repositorio (parámetro «repo»): va antes de las instrucciones, para que todos los agentes
+  // del mismo repo compartan ese trozo de la caché. Solo si ya hay permiso de lectura: nunca lo pide.
+  let map = null;
+  if (String(params.repo || '').trim()) {
+    const root = await access.readable(String(params.repo).trim());
+    if (!root) log(`Mapa del repositorio: ${params.repo} no existe o no tiene permiso de lectura · el agente no lo recibe`);
+    else {
+      try {
+        map = await repoMap(root);
+        log(`Mapa del repositorio: ${map.text.length.toLocaleString('es')} caracteres${map.head ? ` · commit ${map.head.slice(0, 7)}` : ''}${map.cached ? ' · de caché' : ''}`);
+      } catch (e) { log(`No se pudo generar el mapa del repositorio: ${e.message}`); }
+    }
+  }
+  const system = map ? [map.text, instructions].filter(Boolean) : instructions;
+
   // Entrada vacía = automática: el texto principal del nodo anterior
   const auto = params.input == null || params.input === '';
   const picked = auto ? mainText(input) : null;
@@ -157,56 +266,71 @@ export default async function agent(params, input, { signal, log, providers = ne
   if (auto) log(`Entrada automática: ${picked.field ? `campo «${picked.field}» del nodo anterior` : 'salida del nodo anterior'}`);
 
   const maxChars = Number(process.env.ORQ_LLM_MAX_INPUT_CHARS || 400000);
-  if (user.length + system.length > maxChars) {
-    throw Object.assign(new Error(`La entrada tiene ${(user.length + system.length).toLocaleString('es')} caracteres y el límite es ${maxChars.toLocaleString('es')} (ORQ_LLM_MAX_INPUT_CHARS). Divide el documento con un Bucle o sube el límite.`), { retryable: false });
+  const systemChars = instructions.length + (map ? map.text.length : 0);
+  if (user.length + systemChars > maxChars) {
+    throw Object.assign(new Error(`La entrada tiene ${(user.length + systemChars).toLocaleString('es')} caracteres y el límite es ${maxChars.toLocaleString('es')} (ORQ_LLM_MAX_INPUT_CHARS). Divide el documento con un Bucle o sube el límite.`), { retryable: false });
   }
 
   const temperature = params.temperature === '' || params.temperature == null ? undefined : Number(params.temperature);
   const maxTokens = parseInt(params.maxTokens, 10) || 2048;
   const maxTurns = parseInt(params.maxTurns, 10) || 8;
-  const usage = { input: 0, output: 0 };
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const add = u => { if (u) for (const k of Object.keys(usage)) usage[k] += u[k] || 0; };
   const meta = () => ({
     llm: { provider: p.id, label: p.label, kind: p.kind, host: p.host, model, keyEnv: p.keyEnv, source: p.source, fingerprint: p.fingerprint },
-    usage: { ...usage, total: usage.input + usage.output, ...(p.kind === 'mock' ? { estimado: true } : {}) },
+    usage: { ...usage, total: usage.input + usage.output + usage.cacheRead + usage.cacheWrite, weighted: weightedTokens(usage), ...(p.kind === 'mock' ? { estimado: true } : {}) },
   });
+  const n = v => v.toLocaleString('es');
 
   const key = p.kind === 'mock' ? 'sin clave' : `clave ${p.keyEnv} (${p.sourceLabel}) · huella ${p.fingerprint}`;
-  log(`LLM ${p.label}${p.host ? ` (${p.host})` : ''} · ${model} · ${key} · entrada ${user.length.toLocaleString('es')} caracteres`);
+  log(`LLM ${p.label}${p.host ? ` (${p.host})` : ''} · ${model} · ${key} · entrada ${n(user.length)} caracteres`);
 
-  const chat = open(p, { model, system, user, maxTokens, temperature, tools, signal, wantsJson, mockOutput: params.mockOutput, mockTools: params.mockTools });
-  let fixes = 0;
+  const chat = open(p, { model, system, user, maxTokens, temperature, tools, signal, wantsJson, mockOutput: params.mockOutput, mockTools: params.mockTools, promptCache: params.promptCache });
+  let fixes = 0, warned = false;
   try {
+    if (map && chat.prewarm && chat.caching) {
+      const k = crypto.createHash('sha1').update(JSON.stringify([p.id, model, tools.map(t => t.def), map.text])).digest('hex');
+      const u = await sharedPrefix(k, chat, log);
+      if (u) { add(u); log(`Caché precalentada para los agentes de este repositorio (${n(u.cacheWrite)} tokens escritos · ${n(u.cacheRead)} ya estaban en caché)`); }
+      else if (chat.prewarmError) log(`No se pudo precalentar la caché (${chat.prewarmError}); se sigue sin precalentar`);
+    }
     for (let turn = 0; turn < maxTurns + MAX_FIXES; turn++) {
       const r = await chat.next();
-      usage.input += r.usage.input;
-      usage.output += r.usage.output;
+      add(r.usage);
+      if (turn === 2 && !warned && chat.caching && p.kind !== 'mock' && !usage.cacheRead && !usage.cacheWrite) {
+        warned = true;
+        log(`Aviso: tras 3 turnos ${p.label} no ha devuelto uso de caché de prompts; puede que no la admita (se puede desactivar en Workers)`);
+      }
 
       if (r.calls.length) {
-        const results = [];
-        for (const c of r.calls) {
+        const runOne = async c => {
           log(`Herramienta ${c.name} ${JSON.stringify(c.input).slice(0, 140)}`);
-          let out, isError = false;
+          let res, isError = false;
           try {
             if (!tools.some(t => t.def.name === c.name)) throw new Error(`Herramienta no habilitada: ${c.name}`);
-            out = await TOOLS[c.name].run(c.input || {}, { signal, log, params, requestApproval, access });
-          } catch (e) { out = e.message; isError = true; log(`Herramienta ${c.name} · error: ${e.message}`); }
-          results.push({ id: c.id, content: String(out), isError });
-        }
+            res = await TOOLS[c.name].run(c.input || {}, { signal, log, params, requestApproval, access });
+          } catch (e) { res = e.message; isError = true; log(`Herramienta ${c.name} · error: ${e.message}`); }
+          return { id: c.id, content: String(res), isError };
+        };
+        const results = r.calls.every(c => READ_ONLY.has(c.name)) ? await Promise.all(r.calls.map(runOne)) : [];
+        if (!results.length) for (const c of r.calls) results.push(await runOne(c));
         chat.pushResults(results);
+        const dropped = chat.compact?.() || 0;
+        if (dropped) log(`Historial recortado: ${dropped} resultado${dropped === 1 ? '' : 's'} de herramientas antiguos sustituidos por un resumen (ORQ_LLM_COMPACT_AT)`);
         continue;
       }
 
-      log(`${model} · ${usage.input.toLocaleString('es')} tokens de entrada · ${usage.output.toLocaleString('es')} de salida${p.kind === 'mock' ? ' (estimados)' : ''}`);
+      log(`${model} · ${n(usage.input)} tokens de entrada${usage.cacheRead || usage.cacheWrite ? ` · ${n(usage.cacheRead)} leídos de caché · ${n(usage.cacheWrite)} escritos en caché` : ''} · ${n(usage.output)} de salida${p.kind === 'mock' ? ' (estimados)' : ''}`);
       if (r.stop === 'max_tokens') log(`Aviso: la respuesta se cortó al llegar a «Máx. tokens» (${maxTokens})`);
       if (!wantsJson) return { text: r.text };
       if (!schema) return parseJson(r.text);
       // Con esquema: si no es JSON o no lo cumple, se le devuelve al modelo con los errores concretos
-      let out, problems;
-      try { out = parseJson(r.text); problems = validateSchema(schema, out); }
+      let res, problems;
+      try { res = parseJson(r.text); problems = validateSchema(schema, res); }
       catch (e) { problems = [`no es JSON válido (${e.message.slice(0, 160)})`]; }
       if (!problems.length) {
         if (fixes) log(`Respuesta corregida: cumple el esquema`);
-        return out;
+        return res;
       }
       if (fixes >= MAX_FIXES) throw Object.assign(new Error(`La respuesta no cumple el esquema JSON tras ${MAX_FIXES} correcciones: ${problems.slice(0, 5).join('; ')}`), { retryable: false });
       fixes++;

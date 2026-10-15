@@ -368,6 +368,15 @@ export function DataTable({ value, max = 50 }) {
   );
 }
 
+// «12 400 entrada · 38 000 de caché · 2 100 escritos · 900 salida · ahorro 64 %» (ahorro frente a no cachear)
+export function tokenLine(u) {
+  const n = v => (v || 0).toLocaleString('es');
+  if (!u.cacheRead && !u.cacheWrite) return `${n(u.input)} entrada · ${n(u.output)} salida`;
+  const plain = (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0) + (u.output || 0);
+  const saved = plain && u.weighted != null ? Math.round((1 - u.weighted / plain) * 100) : null;
+  return `${n(u.input)} entrada · ${n(u.cacheRead)} de caché · ${n(u.cacheWrite)} escritos · ${n(u.output)} salida${saved > 0 ? ` · ahorro ${saved} %` : ''}`;
+}
+
 export function LlmMeta({ meta }) {
   if (!meta?.llm) return null;
   const { llm, usage } = meta;
@@ -375,7 +384,7 @@ export function LlmMeta({ meta }) {
     <>
       <div className="kv"><span>LLM</span><span className="mono">{llm.label} · {llm.model}</span></div>
       <div className="kv"><span>Clave</span><span className="mono">{keyText(llm)}</span></div>
-      {usage && <div className="kv"><span>Tokens{usage.estimado ? ' (estimados)' : ''}</span><span className="mono">{usage.input?.toLocaleString('es')} entrada · {usage.output?.toLocaleString('es')} salida</span></div>}
+      {usage && <div className="kv"><span>Tokens{usage.estimado ? ' (estimados)' : ''}</span><span className="mono">{tokenLine(usage)}</span></div>}
     </>
   );
 }

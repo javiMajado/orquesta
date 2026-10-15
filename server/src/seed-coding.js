@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ensureAgent } from './agents.js';
+import { ensureAgent, updateAgent } from './agents.js';
+import { Agents, Workflows, Settings } from './db.js';
 
 // Colección «Coding»: flujos de construcción, revisión, QA, tests y seguridad sobre un repositorio.
 // Piezas reutilizables («Coding · (sub) …», se pueden ejecutar solas) que componen los flujos
@@ -17,7 +18,9 @@ const hook = (id, p) => ({ id, type: 'webhook', name: 'Inicio', x: 40, y: 200, p
 const chain = (pfx, ids) => ids.slice(1).map((to, i) => ({ id: `${pfx}${i + 1}`, from: ids[i], to, port: 'out' }));
 const test = v => ({ testInput: JSON.stringify(v, null, 2) });
 const code = lines => ({ code: lines.join('\n') });
-const agentNode = (id, a, x, y, input, extra = {}) => ({ id, type: 'agent', name: a.name.replace(/^Coding · /, ''), x, y, exec: ex('15 min', { retries: '2' }), params: { agentId: a.id, extraPrompt: '', input, ...extra } });
+// Los agentes que leen el repositorio reciben su mapa (parámetro repo); todos los flujos empiezan en «Inicio» con body.repo
+const REPO_PARAM = '{{ $node["Inicio"].body.repo }}';
+const agentNode = (id, a, x, y, input, extra = {}) => ({ id, type: 'agent', name: a.name.replace(/^Coding · /, ''), x, y, exec: ex('15 min', { retries: '2' }), params: { agentId: a.id, extraPrompt: '', input, ...(a.config?.tools ? { repo: REPO_PARAM } : {}), ...extra } });
 const sub = (id, name, x, y) => ({ id, type: 'subflow', name: name.replace(/^Coding · \(sub\) /, ''), x, y, exec: ex(), params: { workflow: name } });
 
 // Repositorio por defecto: el propio Orquesta si se ejecuta desde el código fuente
@@ -33,20 +36,26 @@ const schema = s => JSON.stringify(s, null, 2);
 const READ = { tools: 'listar_ficheros, buscar_ficheros, buscar_en_ficheros, leer_fichero', approveTools: 'Sí', maxTurns: '30' };
 // Cómo explorar un repositorio, como los agentes de coding: buscar antes de leer y seguir el rastro.
 // Se añade a las instrucciones de los agentes que leen código.
-const EXPLORAR = [
-  'Cómo explorar el repositorio (busca antes de leer, no abras ficheros a ciegas):',
-  '1. Lee README y, si existen, CLAUDE.md / AGENTS.md / docs de arquitectura: dicen cómo se organiza y cómo se llaman las cosas.',
+const EXPLORAR_HEAD = 'Cómo explorar el repositorio (busca antes de leer, no abras ficheros a ciegas):';
+const EXPLORAR_STEPS = [
   '2. Saca de la tarea 3-6 términos de búsqueda: entidades, acciones, rutas de API, mensajes de error. Añade sus equivalentes en inglés y variantes (p. ej. «exportar ejecuciones» → export|exportar, run|runs|ejecuci, csv).',
   '3. Usa buscar_en_ficheros con esos términos (con regex: true puedes combinarlos con |; con «incluir» limitas a *.js, src/**…) y buscar_ficheros para localizar ficheros por nombre (p. ej. **/*run*, **/*.test.*).',
   '4. Lee con leer_fichero solo alrededor de las coincidencias útiles (desde unas líneas antes), no ficheros enteros si no hace falta.',
   '5. Sigue el rastro: busca los nombres de funciones, imports, rutas y tablas que descubras hasta entender el flujo completo. Para cuando tengas lo necesario.',
-].join('\n');
+];
+export const EXPLORAR = [EXPLORAR_HEAD,
+  '1. Si al principio tienes el «Mapa del repositorio», empieza por él: estructura, scripts e instrucciones del proyecto. No listes la raíz ni releas README/CLAUDE.md salvo que necesites un detalle que no esté en el mapa. Si no lo tienes, lee README y, si existen, CLAUDE.md / AGENTS.md / docs de arquitectura.',
+  ...EXPLORAR_STEPS].join('\n');
+// Versión anterior (sin mapa): para actualizar los agentes ya creados que no se hayan tocado
+export const EXPLORAR_V1 = [EXPLORAR_HEAD,
+  '1. Lee README y, si existen, CLAUDE.md / AGENTS.md / docs de arquitectura: dicen cómo se organiza y cómo se llaman las cosas.',
+  ...EXPLORAR_STEPS].join('\n');
 // Los simulados listan y buscan en la carpeta (si la reciben) para que se vean el permiso y las herramientas
 const MOCK_LIST = '{{ $json.body?.repo ? [{ name: "listar_ficheros", input: { ruta: $json.body.repo, profundidad: 2 } }, { name: "buscar_en_ficheros", input: { ruta: $json.body.repo, patron: "export|function", regex: true, maxResultados: 10 } }] : [] }}';
 const base = { provider: '', model: '', temperature: '0', maxTokens: '4096', output: 'JSON' };
 
 // ── Agentes (pantalla Agentes)
-const A = {
+export const CODING_AGENTS = {
   revisor: {
     name: 'Coding · Revisor de código',
     description: 'Revisa código (el repositorio o un diff/propuesta) y devuelve hallazgos por severidad.',
@@ -82,7 +91,7 @@ const A = {
   desarrollador: {
     name: 'Coding · Desarrollador',
     description: 'Escribe la propuesta de cambios (código por fichero) siguiendo un plan técnico. No modifica el repositorio.',
-    config: { ...base, output: 'Texto', schema: '', tools: 'buscar_ficheros, buscar_en_ficheros, leer_fichero', approveTools: 'Sí', maxTurns: '30', maxTokens: '8192', mockTools: '',
+    config: { ...base, output: 'Texto', schema: '', tools: READ.tools, approveTools: 'Sí', maxTurns: '30', maxTokens: '8192', mockTools: '',
       prompt: 'Eres desarrollador del proyecto. Recibes una feature y su plan técnico. Localiza y lee los ficheros a modificar y escribe la propuesta de cambios en Markdown: por cada fichero, un apartado «## ruta/del/fichero» con el código nuevo o un bloque ```diff con los cambios, y una línea explicando el porqué. Respeta el estilo del código existente e incluye los tests. No digas que has aplicado nada: es una propuesta para revisar.' + '\n\n' + EXPLORAR,
       mockOutput: '{{ "# Propuesta de cambios (simulada)\\n\\n" + $json.ficheros.map(f => "## " + f.fichero + "\\n\\n```diff\\n+ // (simulado) " + f.detalle + "\\n```\\n").join("\\n") }}' },
   },
@@ -103,6 +112,7 @@ const A = {
       mockOutput: '{{ (() => { const e = $json.entradas || []; const t = e.find(x => x.tipo === "tests"), s = e.find(x => x.tipo === "seguridad"), r = e.find(x => x.tipo === "revision"); const b = []; if (t && !t.ok) b.push("Los tests fallan (" + t.comando + ")"); if (s && s.riesgo === "alto") b.push("Riesgo de seguridad alto"); if (r && r.hallazgos.some(h => h.severidad === "alta")) b.push("Hallazgos de severidad alta en la revisión"); return { veredicto: b.length ? "no apto" : "apto", resumen: "(simulado) " + e.length + " comprobaciones: " + e.map(x => x.tipo).join(", "), bloqueantes: b, recomendaciones: ["(simulado) Revisa los hallazgos de cada informe"] }; })() }}' },
   },
 };
+const A = CODING_AGENTS;
 const agents = () => Object.fromEntries(Object.entries(A).map(([k, def]) => [k, ensureAgent(def)]));
 
 const SUB = { tests: 'Coding · (sub) Tests', revision: 'Coding · (sub) Revisión de código', seguridad: 'Coding · (sub) Seguridad', qa: 'Coding · (sub) Plan de QA' };
@@ -258,3 +268,31 @@ export const CODING = {
     };
   },
 };
+
+// Actualiza lo creado por versiones anteriores (los ejemplos se crean una sola vez). v2: mapa del repo.
+// Solo toca lo que el usuario no ha cambiado: el prompt de un agente si sigue siendo el original, las
+// herramientas del Desarrollador si siguen siendo las de antes, y añade el parámetro repo a los nodos
+// Agente de la colección que no lo tengan.
+export function upgradeCoding() {
+  if ((Settings.get('codingVersion', 1) || 1) >= 2) return;
+  const readers = new Set();
+  for (const def of Object.values(A)) {
+    const cur = Agents.findByName(def.name);
+    if (!cur) continue;
+    const patch = {};
+    if (def.config.prompt && cur.config.prompt === def.config.prompt.replace(EXPLORAR, EXPLORAR_V1)) patch.prompt = def.config.prompt;
+    if (def === A.desarrollador && cur.config.tools === 'buscar_ficheros, buscar_en_ficheros, leer_fichero') patch.tools = READ.tools;
+    if (Object.keys(patch).length) updateAgent(cur.id, { config: patch });
+    if (patch.tools || cur.config.tools) readers.add(cur.id);
+  }
+  for (const w of Workflows.list().filter(x => x.collection === COL)) {
+    let changed = false;
+    const nodes = (w.graph?.nodes || []).map(n => {
+      if (n.type !== 'agent' || !readers.has(n.params?.agentId) || 'repo' in (n.params || {})) return n;
+      changed = true;
+      return { ...n, params: { ...n.params, repo: REPO_PARAM } };
+    });
+    if (changed) Workflows.update(w.id, { graph: { ...w.graph, nodes } });
+  }
+  Settings.set('codingVersion', 2);
+}

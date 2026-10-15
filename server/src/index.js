@@ -12,7 +12,7 @@ import { createTriggers } from './triggers.js';
 import { createDatasets } from './datasets.js';
 import { seedIfEmpty } from './seed.js';
 import { makePolicy } from './security.js';
-import { resolveLlm, llmDefault } from './llm.js';
+import { resolveLlm, llmDefault, llmCache, setLlmCache } from './llm.js';
 import { listAgents, getAgent, createAgent, updateAgent, deleteAgent } from './agents.js';
 import { listGrants, grant, updateGrant, revokeGrant } from './grants.js';
 import { mountMockJira } from './mock-jira.js';
@@ -169,11 +169,12 @@ api.put('/permissions/:id', wrap(req => must(updateGrant(req.params.id, pick(req
 api.delete('/permissions/:id', wrap(req => { must(revokeGrant(req.params.id)); return { ok: true }; }));
 api.get('/llm/models', wrap(async req => ({ models: await registry.models(String(req.query.provider || '')) })));
 api.patch('/workers/:id', wrap(req => { registry.setEnabled(req.params.id, !!req.body?.enabled); return registry.list(); }));
-api.get('/settings', wrap(() => ({ strategy: registry.strategy })));
+api.get('/settings', wrap(() => ({ strategy: registry.strategy, llmCache: llmCache() })));
 api.put('/settings', wrap(req => {
   if (['carga', 'rr', 'afinidad'].includes(req.body?.strategy)) Settings.set('strategy', req.body.strategy);
+  if (req.body?.llmCache && typeof req.body.llmCache === 'object') setLlmCache(req.body.llmCache);
   registry.changed();
-  return { strategy: registry.strategy };
+  return { strategy: registry.strategy, llmCache: llmCache() };
 }));
 
 app.use('/api', api);

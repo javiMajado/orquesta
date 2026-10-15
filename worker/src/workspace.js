@@ -8,9 +8,9 @@ import { makeAccess, envCommands } from './access.js';
 // .env o concedidos al pedirlos. Al proceso de un comando no le llegan las variables con secretos.
 
 const fail = msg => Object.assign(new Error(msg), { retryable: false });
-const IGNORE = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.turbo', '.cache', '__pycache__', '.venv', 'venv', 'target', 'bin', 'obj']);
+export const IGNORE = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.turbo', '.cache', '__pycache__', '.venv', 'venv', 'target', 'bin', 'obj']);
 // Ficheros que suelen tener secretos: no se leen nunca (.env.example y similares sí)
-const SECRET_FILE = /^(\.env(\.(?!example$|sample$|template$)[^.]+)*|.*\.(pem|key|pfx|p12|keystore)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.npmrc|\.pypirc|\.netrc|credentials(\.json)?)$/i;
+export const SECRET_FILE = /^(\.env(\.(?!example$|sample$|template$)[^.]+)*|.*\.(pem|key|pfx|p12|keystore)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.npmrc|\.pypirc|\.netrc|credentials(\.json)?)$/i;
 const SECRET_ENV = /(KEY|TOKEN|SECRET|PASS|CREDENTIAL|AUTH|COOKIE|SESSION)|^(ANTHROPIC|OPENAI|ORQ|SMTP|SLACK|DB_CONNECTIONS|WORKER)_?/i;
 
 export const allowedCommands = envCommands;
@@ -63,7 +63,7 @@ const globMatcher = globs => {
 };
 
 // Recorre los ficheros de una carpeta (sin node_modules, .git…, enlaces ni ficheros con secretos)
-async function* walkFiles(root, maxFiles = 20000) {
+export async function* walkFiles(root, maxFiles = 20000) {
   let n = 0;
   const stack = [root];
   while (stack.length) {

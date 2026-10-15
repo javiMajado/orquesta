@@ -27,7 +27,7 @@ export const DEF = {
   webhook: { method: 'POST', path: '/mi-ruta', auth: 'Ninguna', respond: 'Inmediato' },
   cron: { expr: '0 8 * * 1-5', tz: 'Europe/Madrid' },
   event: { topic: 'mi.evento' },
-  agent: { agentId: '', extraPrompt: '', overrideProvider: '', overrideModel: '', provider: '', model: '', prompt: '', input: '', output: 'Texto', schema: '', tools: '', approveTools: 'Sí', maxTurns: '', temperature: '', maxTokens: '2048', mockOutput: '', mockTools: '' },
+  agent: { agentId: '', extraPrompt: '', overrideProvider: '', overrideModel: '', provider: '', model: '', prompt: '', input: '', repo: '', output: 'Texto', schema: '', tools: '', approveTools: 'Sí', maxTurns: '', temperature: '', maxTokens: '2048', mockOutput: '', mockTools: '' },
   node: { code: '// $json contiene la salida del nodo anterior\nreturn { ...$json, procesado: true };' },
   http: { method: 'GET', url: 'https://', headers: '', body: '', failOnError: 'Sí' },
   db: { conn: '', query: 'SELECT 1 AS ok;', params: '' },
@@ -52,6 +52,7 @@ export const FIELDS = {
   agent: [
     ['prompt', 'Instrucciones del sistema', 't', 0, 0, 6],
     ['input', 'Entrada', 't', 0, 1, 3, 'Vacío = automático: el texto del nodo anterior (el contenido de un fichero, la respuesta de otro agente…). Rellénalo solo si quieres otra cosa.'],
+    ['repo', 'Repositorio', 'i', 0, 1, 0, 'Opcional. Carpeta del repositorio con el que trabaja: el agente recibe al principio un mapa (estructura, scripts e instrucciones del proyecto) y no gasta turnos ni tokens en explorarlo; los agentes del mismo repo lo comparten en la caché. Admite {{ expresiones }}. Necesita permiso de lectura en la carpeta.'],
     ['output', 'Formato de salida', 's', ['Texto', 'JSON']],
     ['schema', 'Esquema JSON de la respuesta', 't', 0, 1, 8, 'Opcional, solo con salida JSON. Se añade a las instrucciones y se comprueba la respuesta: si no lo cumple, se le pide al modelo que la corrija (hasta 2 veces). Ej.: { "type": "object", "properties": { "sql": { "type": "string" } }, "required": ["sql"], "additionalProperties": false }'],
     ['tools', 'Herramientas', 'i', 0, 1, 0, 'Separadas por comas. Vacío = ninguna. Disponibles: listar_ficheros, buscar_ficheros, buscar_en_ficheros, leer_fichero, ejecutar_comando (si la carpeta o el comando no tienen permiso, se te pedirá), http_request (dominios de ORQ_AGENT_HTTP_ALLOW), fecha_actual'],

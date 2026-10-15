@@ -629,3 +629,6 @@ button.switch { border: 0; padding: 0; cursor: pointer; }
 .inp-pop .mono { color: var(--color-accent-300); }
 .inp-pop .row { display: flex; gap: 6px; }
 .save-case { padding: 14px; gap: 10px; display: flex; flex-direction: column; max-width: 640px; }
+
+/* Selector compacto dentro de una tabla (caché de prompts en Workers) */
+.input.input-sm { min-height: 28px; padding: 2px 8px; font-size: 12.5px; width: auto; }
