@@ -15,6 +15,29 @@ export async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 
+// Descarga un fichero (p. ej. CSV). Va con fetch + Blob: un <a href> directo no enviaría el Bearer token.
+// Devuelve { truncated } si el servidor cortó la exportación por su límite de filas.
+export async function downloadFile(path, filename) {
+  const r = await fetch('/api' + path, { headers: token() ? { authorization: `Bearer ${token()}` } : {} });
+  if (r.status === 401) {
+    const t = window.prompt('Esta instancia requiere un token de API');
+    if (t) { localStorage.setItem('orq_token', t); return downloadFile(path, filename); }
+  }
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({}));
+    throw new Error(data.error || r.statusText);
+  }
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { truncated: r.headers.get('X-Export-Truncated') === '1' };
+}
+
 // Canal de eventos en vivo (ejecuciones, pasos, logs, workers) con reconexión.
 export function connectLive(onMsg) {
   let ws, closed = false, retry = 0;

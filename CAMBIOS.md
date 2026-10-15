@@ -2,6 +2,13 @@
 
 Hechos sobre `main` @ 6a777a7 (12-10-2026). **No se han ejecutado**: lo primero es `npm install && npm test` y `npm run dev`. Solo la lógica compartida (`packages/shared/src/inputs.js`) se probó aparte.
 
+## Exportación de ejecuciones a CSV
+- En **Ejecuciones** hay un botón «Exportar CSV» y un selector de workflow. El fichero respeta los filtros de estado y de workflow de la pantalla.
+- `GET /api/runs/export.csv?workflowId=&status=`: mismos filtros que `GET /api/runs`, sin el límite de 200 (máximo 10 000 filas). Un estado no válido devuelve 400.
+- Columnas: `id;seq;workflowId;workflowName;status;mode;startedAt;finishedAt;durationMs;parentRunId;error`. Separador `;`, BOM UTF-8, fechas ISO. Nunca incluye `input` ni `output`.
+- Las celdas que empiezan por `= + - @` o tabulador se prefijan con `'` para que Excel no las ejecute como fórmula.
+- Código: `server/src/runs-export.js` (módulo puro), ruta en `server/src/index.js`, descarga con token en `web/src/api.js` (`downloadFile`). Tests: `server/test/runs-export.test.js`.
+
 ## Qué hay de nuevo
 - **Campos de entrada** en los disparadores. Están en una pestaña nueva del panel del nodo: tipo, obligatorio, ruta, valor por defecto, ayuda, opciones y orden arrastrando. Incluye sugerencias de campos detectados, «Inferir de un JSON» y «Validar llamadas reales», que hace que el webhook responda 400.
 - **Panel de ejecución**: el botón Ejecutar lo abre y, con el panel abierto, ejecuta (también con Ctrl + Enter; Esc lo cierra). Tiene tres pestañas:

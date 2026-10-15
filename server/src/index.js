@@ -18,6 +18,7 @@ import { listProjects, getProject, createProject, updateProject, deleteProject, 
 import { listGrants, grant, updateGrant, revokeGrant } from './grants.js';
 import { mountMockJira } from './mock-jira.js';
 import { listSchedules } from './schedules.js';
+import { parseRunFilters, runsToCsv, EXPORT_MAX_ROWS } from './runs-export.js';
 import { listConnections, createConnection, updateConnection, deleteConnection, resolveForWorker, payloadForTest } from './connections.js';
 
 Runs.markInterrupted();
@@ -110,6 +111,18 @@ api.delete('/workflows/:id/listen', wrap(req => datasets.stopListening(req.param
 api.post('/runs/:id/save-as-case', wrap(req => datasets.saveRunAsCase(req.params.id, pick(req.body, ['datasetId', 'name']))));
 
 api.get('/runs', wrap(req => Runs.list({ workflowId: req.query.workflowId, status: req.query.status, limit: Math.min(500, Number(req.query.limit) || 100) })));
+// Exportación CSV del listado: mismos filtros, sin el límite de 500 filas. Debe ir ANTES de /runs/:id
+// (si no, «export.csv» se tomaría como id). Responde directamente: wrap solo sirve JSON.
+api.get('/runs/export.csv', (req, res) => {
+  try {
+    const runs = Runs.list({ ...parseRunFilters(req.query), limit: EXPORT_MAX_ROWS });
+    const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    res.type('text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="ejecuciones-${day}.csv"`);
+    if (runs.length >= EXPORT_MAX_ROWS) res.set('X-Export-Truncated', '1');
+    res.send(runsToCsv(runs));
+  } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+});
 api.get('/runs/:id', wrap(req => {
   const r = must(Runs.get(req.params.id));
   return { ...r, steps: Steps.byRun(r.id), logs: Logs.byRun(r.id), pending: engine.pending(r.id) };

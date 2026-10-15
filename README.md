@@ -207,6 +207,7 @@ Cada nodo de acción tiene **reintentos** (con backoff exponencial) y **timeout*
 | GET/PUT/DELETE | `/api/workflows/:id` | Leer / guardar (`name`, `description`, `active`, `graph`) / borrar |
 | POST | `/api/workflows/:id/run` | Ejecutar con `{ input }` |
 | GET | `/api/runs?workflowId=&status=` | Historial |
+| GET | `/api/runs/export.csv?workflowId=&status=` | Exportación CSV (`;`, UTF-8 con BOM): mismos filtros que el historial, hasta 10 000 filas, sin `input`/`output` |
 | GET | `/api/runs/:id` | Detalle con pasos, logs y aprobaciones pendientes |
 | POST | `/api/runs/:id/cancel` | Cancelar |
 | POST | `/api/runs/:id/approvals/:nodeId` | `{ approved, by, comment }` |
