@@ -3,6 +3,7 @@ import { Workflows, Runs, Steps, Logs } from './db.js';
 import { NoWorkerError, CancelledError } from './registry.js';
 import { CAPS, TRIGGERS, ACTION_TYPES, parseDuration } from '@orquesta/shared/types';
 import { evalExpr, render, renderParams, publicEnv, mainText } from '@orquesta/shared/expr';
+import { applyOverrides } from '@orquesta/shared/overrides';
 import { notifyApproval } from './notify.js';
 import { resolveLlm } from './llm.js';
 import { resolveForWorker } from './connections.js';
@@ -34,10 +35,11 @@ export class Engine extends EventEmitter {
   // stopAt: «ejecutar hasta aquí». Solo se ejecutan ese nodo y los que llevan hasta él; las demás ramas
   // no se lanzan y los bucles hacen solo su primer elemento. La salida de la ejecución es la de ese nodo.
   // parentStep: { stepId, stepEvt } del nodo Sub-workflow que lanza esta ejecución (para reflejar en él sus esperas)
-  start(workflowId, { mode = 'manual', input = {}, triggerNodeId, parentRunId, parentStep, stopAt } = {}) {
+  // overrides: ajustes del nodo Sub-workflow sobre los nodos de este workflow, solo para esta ejecución
+  start(workflowId, { mode = 'manual', input = {}, triggerNodeId, parentRunId, parentStep, stopAt, overrides } = {}) {
     const wf = Workflows.get(workflowId);
     if (!wf) throw Object.assign(new Error('Workflow no encontrado'), { status: 404 });
-    const g = { nodes: [], edges: [], ...(wf.graph || {}) };
+    const { graph: g, applied } = applyOverrides({ nodes: [], edges: [], ...(wf.graph || {}) }, overrides);
     let only = null;
     if (stopAt) {
       if (!g.nodes.some(n => n.id === stopAt)) throw Object.assign(new Error('Ese nodo no existe en el workflow guardado'), { status: 400 });
@@ -60,6 +62,7 @@ export class Engine extends EventEmitter {
     this.active.set(run.id, ctx);
     this.emitRun(run.id);
     this.log(ctx, 'info', null, 'orquestador', `Ejecución (${mode}) de «${wf.name}» · estrategia ${this.registry.strategy}`);
+    if (applied.length) this.log(ctx, 'info', null, 'orquestador', `Ajustes del nodo Sub-workflow en: ${applied.map(n => `«${n}»`).join(', ')} (solo en esta ejecución)`);
     if (only) this.log(ctx, 'info', null, 'orquestador', `Ejecutar hasta «${g.nodes.find(n => n.id === stopAt).name}»: solo ese nodo y los anteriores (${only.size} nodos)`);
 
     const done = this.runNode(ctx, trig, input, 'r')
@@ -189,7 +192,7 @@ export class Engine extends EventEmitter {
         const target = Workflows.get(p.workflow) || Workflows.findByName(p.workflow);
         if (!target) throw new Error(`Sub-workflow «${p.workflow}» no encontrado`);
         if (target.id === ctx.wf.id) throw new Error('Un workflow no puede invocarse a sí mismo');
-        const child = this.start(target.id, { mode: 'subflow', input, parentRunId: ctx.runId, parentStep: h });
+        const child = this.start(target.id, { mode: 'subflow', input, parentRunId: ctx.runId, parentStep: h, overrides: p.overrides });
         ctx.children.push(child.runId);
         Steps.update(h.stepId, { childRunId: child.runId });
         h.stepEvt({ childRunId: child.runId });

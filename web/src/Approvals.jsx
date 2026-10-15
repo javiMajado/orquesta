@@ -1,9 +1,12 @@
 import { pretty } from './api.js';
+import { CopyButton } from './BigView.jsx';
 
 // Aprobaciones pendientes: qué se espera, lo que se va a ejecutar y los botones para decidir.
 // Los usan el panel del nodo, la traza (también para los sub-workflows) y el detalle de la ejecución.
 
 const shown = v => (typeof v === 'string' ? v : pretty(v));
+// Lo que más importa revisar va arriba y destacado, entero y copiable
+const KEY_FIELDS = ['comando', 'command', 'url', 'query', 'to'];
 
 // Botones de una aprobación pendiente. Un permiso pedido en runtime se puede conceder siempre
 // (queda en Permisos) o solo esta vez. onDecide(aprobado, alcance)
@@ -40,14 +43,22 @@ export function approvalText(meta, node) {
   return { title: 'Esperando aprobación', text: `Asignado a ${node?.params?.assignee || '—'}. La ejecución está en pausa.` };
 }
 
-// Lo que se va a ejecutar, para revisarlo antes de aprobar
-export function ReviewParams({ meta }) {
+// Lo que se va a ejecutar, para revisarlo antes de aprobar. big: sin límite de alto (vista en grande)
+export function ReviewParams({ meta, big = false }) {
   const params = meta?.revision?.params;
   if (!params) return null;
   const rows = Object.entries(params).filter(([, v]) => v !== '' && v != null);
+  const key = rows.filter(([k]) => KEY_FIELDS.includes(k));
+  const rest = rows.filter(([k]) => !KEY_FIELDS.includes(k));
   return (
-    <div className="review">
-      {rows.map(([k, v]) => <div key={k} className="review-row"><span className="mono">{k}</span><pre>{shown(v)}</pre></div>)}
+    <div className={`review ${big ? 'big' : ''}`}>
+      {key.map(([k, v]) => (
+        <div key={k} className="review-key">
+          <div className="review-key-head"><span className="mono">{k}</span><CopyButton text={shown(v)} /></div>
+          <pre>{shown(v)}</pre>
+        </div>
+      ))}
+      {rest.map(([k, v]) => <div key={k} className="review-row"><span className="mono">{k}</span><pre>{shown(v)}</pre></div>)}
     </div>
   );
 }

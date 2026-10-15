@@ -3,6 +3,8 @@ import { TYPES, FIELDS, CAPS, tileClass } from './nodeTypes.js';
 import { api, pretty } from './api.js';
 import { DataPicker, AutoHint } from './DataPicker.jsx';
 import Trace from './Trace.jsx';
+import { SubflowSummary } from './SubflowBox.jsx';
+import BigView, { CopyButton } from './BigView.jsx';
 import { DecisionButtons, approvalText, ReviewParams } from './Approvals.jsx';
 
 export { DecisionButtons, approvalText, ReviewParams };
@@ -144,7 +146,7 @@ export function AgentCard({ agent, llm, actions, footer }) {
 // Lo que aporta un agente personalizado (pantalla Agentes); el nodo conserva su entrada
 const AGENT_KEYS = ['provider', 'model', 'prompt', 'output', 'schema', 'tools', 'approveTools', 'maxTurns', 'temperature', 'maxTokens', 'mockOutput', 'mockTools'];
 // Con agente elegido, estos campos los pone el agente y no se muestran en el nodo
-const FROM_AGENT = ['prompt', 'output', 'schema', 'tools', 'approveTools', 'maxTurns', 'temperature', 'maxTokens'];
+export const FROM_AGENT = ['prompt', 'output', 'schema', 'tools', 'approveTools', 'maxTurns', 'temperature', 'maxTokens'];
 
 // Misma regla que applyAgent (server/src/agents.js): proveedor y modelo del agente con el cambio del nodo
 const withOverride = (c, p) => {
@@ -154,7 +156,7 @@ const withOverride = (c, p) => {
 };
 
 // Con agente guardado: cambiar su proveedor/modelo solo en este nodo (el agente no se modifica)
-function AgentModelOverride({ node, agent, llm, set }) {
+export function AgentModelOverride({ node, agent, llm, set }) {
   const [models, setModels] = useState({});
   const [err, setErr] = useState('');
   const p = node.params, c = agent.config || {};
@@ -279,7 +281,7 @@ function AgentPicker({ node, onNode, workers, onLeave }) {
 }
 
 // Campos del nodo Fichero que solo aplican a una de las acciones
-const FILE_ONLY = { format: 'Leer', ifMissing: 'Leer', content: 'Escribir', ifExists: 'Escribir' };
+export const FILE_ONLY = { format: 'Leer', ifMissing: 'Leer', content: 'Escribir', ifExists: 'Escribir' };
 const desktop = typeof window !== 'undefined' ? window.orquestaDesktop : null;
 
 // «Examinar…»: diálogo nativo de Windows en la app de escritorio
@@ -307,7 +309,7 @@ function FilePicker({ node, setParam }) {
 }
 
 // Desplegable de conexiones (pantalla Conexiones + DB_CONNECTIONS del .env)
-function ConnSelect({ value, onChange }) {
+export function ConnSelect({ value, onChange }) {
   const [list, setList] = useState(null);
   const [err, setErr] = useState('');
   useEffect(() => { api('/connections').then(setList).catch(e => setErr(e.message)); }, []);
@@ -399,6 +401,37 @@ export function Field({ f, value, onChange, workflows = [], onFocus }) {
   );
 }
 
+// Ancho del panel lateral: se arrastra desde su borde izquierdo y se recuerda (por navegador)
+const W_KEY = 'orq.panelWidth', W_MIN = 300, W_NARROW = 328, W_WIDE = 620;
+const maxWidth = () => Math.max(W_MIN, Math.min(1100, Math.round(window.innerWidth * 0.7)));
+function usePanelWidth() {
+  const [w, setW] = useState(() => { try { return Number(localStorage.getItem(W_KEY)) || W_NARROW; } catch { return W_NARROW; } });
+  const clamp = v => Math.max(W_MIN, Math.min(maxWidth(), Math.round(v)));
+  const keep = v => { const c = clamp(v); setW(c); try { localStorage.setItem(W_KEY, String(c)); } catch {} };
+  const startDrag = e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const x0 = e.clientX, w0 = clamp(w);
+    const move = ev => setW(clamp(w0 + x0 - ev.clientX));
+    const up = ev => {
+      keep(w0 + x0 - ev.clientX);
+      window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
+      document.body.classList.remove('resizing-x');
+    };
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+    document.body.classList.add('resizing-x');
+  };
+  const width = clamp(w), wide = width > (W_NARROW + W_WIDE) / 2;
+  return { width, wide, startDrag, toggle: () => keep(wide ? W_NARROW : W_WIDE) };
+}
+
+function PanelResize({ pw }) {
+  return <div className="panel-resize" onMouseDown={pw.startDrag} onDoubleClick={pw.toggle} title="Arrastra para cambiar el ancho · doble clic: ampliar / reducir" />;
+}
+function WidthButton({ pw }) {
+  return <button className="btn btn-icon btn-xs" onClick={pw.toggle} title={pw.wide ? 'Reducir el panel' : 'Ampliar el panel'}><i className={`ph ${pw.wide ? 'ph-arrow-line-right' : 'ph-arrow-line-left'}`} /></button>;
+}
+
 // Campos donde se rellena solo con el texto del nodo anterior si se dejan vacíos
 const AUTO = { agent: 'input', file: 'content', email: 'body' };
 
@@ -406,15 +439,19 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
   const [tab, setTab] = useState('params');
   const focus = useRef(null); // { nodeId, key, el }: último campo de texto con el cursor
   const [pickMsg, setPickMsg] = useState('');
-  useEffect(() => { setPickMsg(''); }, [node?.id]);
+  const [big, setBig] = useState(null); // 'out' | 'approval': vista en grande
+  const pw = usePanelWidth();
+  useEffect(() => { setPickMsg(''); setBig(null); }, [node?.id]);
 
   if (!node) {
     return (
-      <aside className="side panel">
+      <aside className="side panel" style={{ width: pw.width }}>
+        <PanelResize pw={pw} />
         <div className="panel-head">
           <div className="tabs">
             <button className={sideTab !== 'traza' ? 'on' : ''} onClick={() => onSideTab?.('wf')}>Workflow</button>
             <button className={sideTab === 'traza' ? 'on' : ''} onClick={() => onSideTab?.('traza')}>Traza{running && <span className="tab-dot" />}</button>
+            <span className="tabs-end"><WidthButton pw={pw} /></span>
           </div>
         </div>
         {sideTab === 'traza' ? (
@@ -479,7 +516,8 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
   };
 
   return (
-    <aside className="side panel">
+    <aside className="side panel" style={{ width: pw.width }}>
+      <PanelResize pw={pw} />
       <div className="panel-head">
         <div className="panel-title">
           <div className={`tile ${tileClass(node.type)}`}><i className={`ph ${t.icon}`} /></div>
@@ -487,6 +525,7 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
             <span className="node-kind">{t.kind}</span>
             <input className="title-input" value={node.name} onChange={e => onNode({ name: e.target.value })} />
           </div>
+          <WidthButton pw={pw} />
           <button className="btn btn-icon btn-xs" onClick={onDelete} title="Eliminar nodo"><i className="ph ph-trash" /></button>
           <button className="btn btn-icon btn-xs" onClick={onClose} title="Cerrar"><i className="ph ph-x" /></button>
         </div>
@@ -507,7 +546,10 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
         )}
         {step?.status === 'waiting' && node.type !== 'subflow' && (
           <div className="approval-card">
-            <b>{approvalText(step.meta, node).title}</b>
+            <div className="approval-head">
+              <b>{approvalText(step.meta, node).title}</b>
+              {step.meta?.revision && <button type="button" className="btn btn-icon btn-xs" onClick={() => setBig('approval')} title="Ver en grande"><i className="ph ph-arrows-out-simple" /></button>}
+            </div>
             <span>{approvalText(step.meta, node).text}</span>
             <ReviewParams meta={step.meta} />
             <DecisionButtons meta={step.meta} onDecide={onDecide} />
@@ -545,6 +587,7 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
                   {AUTO[node.type] === f[0] && <AutoHint node={node} graph={graph} steps={steps} testInput={graph.settings?.testInput} value={node.params[f[0]]} />}
                 </Fragment>
               ))}
+            {node.type === 'subflow' && <SubflowSummary node={node} onNode={onNode} workflows={workflows} onLeave={href => (onLeave ? onLeave(href) : (location.hash = href))} />}
             <DataPicker node={node} graph={graph} steps={steps} testInput={graph.settings?.testInput} onPick={pick} onRunUntil={running ? null : onRunUntil} />
             {pickMsg && <small className="help pick-msg">{pickMsg}</small>}
             <div className="section-rule"><span className="eyebrow">Ejecución</span><span className="rule" /></div>
@@ -572,6 +615,10 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
           </>
         ) : hasOut ? (
           <>
+            <div className="out-tools">
+              {step.output != null && <CopyButton text={typeof step.output === 'string' ? step.output : pretty(step.output)} />}
+              <button type="button" className="btn btn-secondary btn-xs-text" onClick={() => setBig('out')}><i className="ph ph-arrows-out-simple" />Ver en grande</button>
+            </div>
             {step.worker && <div className="kv"><span>Ejecutado por</span><span className="mono accent">{step.worker}</span></div>}
             {step.childRunId && (
               <div className="sub-trace">
@@ -586,6 +633,26 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
           </>
         ) : <p className="muted">Ejecuta el workflow para ver la salida de este nodo.</p>}
       </div>
+      {big === 'out' && hasOut && (
+        <BigView title={`Salida · ${node.name}`} onClose={() => setBig(null)}
+          actions={step.output != null && <CopyButton text={typeof step.output === 'string' ? step.output : pretty(step.output)} />}>
+          {step.worker && <div className="kv big-kv"><span>Ejecutado por</span><span className="mono accent">{step.worker}</span></div>}
+          <LlmMeta meta={step.meta} />
+          {step.error && <pre className="out err big">{step.error}</pre>}
+          {step.output != null && <DataTable value={step.output} max={500} />}
+          {step.output != null && <pre className="out big">{typeof step.output === 'string' ? step.output : pretty(step.output)}</pre>}
+        </BigView>
+      )}
+      {big === 'approval' && step?.status === 'waiting' && step.meta?.revision && (
+        <BigView title={approvalText(step.meta, node).title} icon="ph-pause-circle" onClose={() => setBig(null)}>
+          <span className="muted">{approvalText(step.meta, node).text}</span>
+          <ReviewParams meta={step.meta} big />
+          {step.meta.revision.input != null && (
+            <details className="big-details"><summary>Entrada que recibe el nodo</summary><pre className="out big">{pretty(step.meta.revision.input)}</pre></details>
+          )}
+          <div className="big-actions"><DecisionButtons meta={step.meta} onDecide={(...a) => { setBig(null); onDecide(...a); }} /></div>
+        </BigView>
+      )}
     </aside>
   );
 }

@@ -38,7 +38,7 @@ export const DEF = {
   loop: { items: '{{ $json.items }}', batch: '1' },
   parallel: { mode: 'Dividir' },
   wait: { duration: '5', unit: 'segundos' },
-  subflow: { workflow: '' },
+  subflow: { workflow: '', overrides: {} },
   approval: { assignee: 'equipo', channel: 'Panel', timeout: '4 h' },
 };
 

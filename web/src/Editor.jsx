@@ -3,6 +3,7 @@ import { api, dur, STATUS } from './api.js';
 import { TYPES, GROUPS, TRIGGERS, NW, NH, outPorts, portY, tileClass, newNode } from './nodeTypes.js';
 import NodePanel, { DecisionButtons } from './NodePanel.jsx';
 import { decide as decideIn, pendingIn } from './Trace.jsx';
+import { countOverrides } from './SubflowBox.jsx';
 
 const curve = (x1, y1, x2, y2) => {
   const dx = Math.max(50, Math.abs(x2 - x1) / 2);
@@ -183,6 +184,7 @@ export default function Editor({ id, workers, subscribe }) {
     const key = e => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+      if (document.querySelector('.dialog-backdrop')) return; // diálogo abierto (p. ej. ajustes de un sub-workflow)
       if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSel(); }
       if (e.key === 'Escape') { setSel(null); setSelEdge(null); }
     };
@@ -342,6 +344,8 @@ export default function Editor({ id, workers, subscribe }) {
                     <div className="node-txt">
                       <span className="node-kind">{t.kind}{n.type === 'agent' && n.params?.agentId && (
                         <span className={agents[n.params.agentId] ? 'node-agent' : 'node-agent missing'}> · {agents[n.params.agentId] || (n.params.agentId in agents ? 'agente no encontrado' : '…')}</span>
+                      )}{n.type === 'subflow' && countOverrides(n.params?.overrides) > 0 && (
+                        <span className="node-agent"> · {countOverrides(n.params.overrides)} ajuste{countOverrides(n.params.overrides) === 1 ? '' : 's'}</span>
                       )}</span>
                       <span className="node-name">{n.name}</span>
                     </div>
