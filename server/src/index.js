@@ -14,6 +14,7 @@ import { seedIfEmpty } from './seed.js';
 import { makePolicy } from './security.js';
 import { resolveLlm, llmDefault, llmCache, setLlmCache } from './llm.js';
 import { listAgents, getAgent, createAgent, updateAgent, deleteAgent } from './agents.js';
+import { listProjects, getProject, createProject, updateProject, deleteProject, listNotes, addNote, updateNote, deleteNote } from './projects.js';
 import { listGrants, grant, updateGrant, revokeGrant } from './grants.js';
 import { mountMockJira } from './mock-jira.js';
 import { listSchedules } from './schedules.js';
@@ -162,6 +163,17 @@ api.get('/agents/:id', wrap(req => must(getAgent(req.params.id))));
 api.post('/agents', wrap(req => createAgent(req.body || {})));
 api.put('/agents/:id', wrap(req => must(updateAgent(req.params.id, req.body || {}))));
 api.delete('/agents/:id', wrap(req => { must(deleteAgent(req.params.id)); return { ok: true }; }));
+// Proyectos y sus notas (memoria para los agentes; solo se usan las aprobadas)
+const notesChanged = projectId => broadcast({ type: 'notes', projectId });
+api.get('/projects', wrap(() => listProjects()));
+api.post('/projects', wrap(req => createProject(pick(req.body, ['name', 'path', 'description']))));
+api.get('/projects/:id', wrap(req => must(getProject(req.params.id))));
+api.put('/projects/:id', wrap(req => must(updateProject(req.params.id, pick(req.body, ['name', 'path', 'description'])))));
+api.delete('/projects/:id', wrap(req => { must(deleteProject(req.params.id)); notesChanged(req.params.id); return { ok: true }; }));
+api.get('/projects/:id/notes', wrap(req => must(listNotes(req.params.id))));
+api.post('/projects/:id/notes', wrap(req => { const n = addNote(req.params.id, pick(req.body, ['text', 'paths'])); notesChanged(n.projectId); return n; }));
+api.put('/notes/:id', wrap(req => { const n = must(updateNote(req.params.id, pick(req.body, ['text', 'paths', 'status']))); notesChanged(n.projectId); return n; }));
+api.delete('/notes/:id', wrap(req => { must(deleteNote(req.params.id)); notesChanged(null); return { ok: true }; }));
 // Permisos de carpetas y comandos concedidos por el usuario (los del .env se muestran aparte)
 api.get('/permissions', wrap(() => listGrants()));
 api.post('/permissions', wrap(req => grant({ ...pick(req.body, ['path', 'read', 'write', 'commands']), by: req.body?.by || 'panel' })));

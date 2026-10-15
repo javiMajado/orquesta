@@ -33,7 +33,9 @@ const obj = (properties, required) => ({ type: 'object', properties, required, a
 const str = { type: 'string' };
 const list = items => ({ type: 'array', items });
 const schema = s => JSON.stringify(s, null, 2);
-const READ = { tools: 'listar_ficheros, buscar_ficheros, buscar_en_ficheros, leer_fichero', approveTools: 'Sí', maxTurns: '30' };
+// proponer_nota solo se ofrece al modelo si la ejecución tiene proyecto
+const READ_V2 = 'listar_ficheros, buscar_ficheros, buscar_en_ficheros, leer_fichero';
+const READ = { tools: `${READ_V2}, proponer_nota`, approveTools: 'Sí', maxTurns: '30' };
 // Cómo explorar un repositorio, como los agentes de coding: buscar antes de leer y seguir el rastro.
 // Se añade a las instrucciones de los agentes que leen código.
 const EXPLORAR_HEAD = 'Cómo explorar el repositorio (busca antes de leer, no abras ficheros a ciegas):';
@@ -43,16 +45,27 @@ const EXPLORAR_STEPS = [
   '4. Lee con leer_fichero solo alrededor de las coincidencias útiles (desde unas líneas antes), no ficheros enteros si no hace falta.',
   '5. Sigue el rastro: busca los nombres de funciones, imports, rutas y tablas que descubras hasta entender el flujo completo. Para cuando tengas lo necesario.',
 ];
-export const EXPLORAR = [EXPLORAR_HEAD,
-  '1. Si al principio tienes el «Mapa del repositorio», empieza por él: estructura, scripts e instrucciones del proyecto. No listes la raíz ni releas README/CLAUDE.md salvo que necesites un detalle que no esté en el mapa. Si no lo tienes, lee README y, si existen, CLAUDE.md / AGENTS.md / docs de arquitectura.',
-  ...EXPLORAR_STEPS].join('\n');
-// Versión anterior (sin mapa): para actualizar los agentes ya creados que no se hayan tocado
+const EXPLORAR_MAPA = '1. Si al principio tienes el «Mapa del repositorio», empieza por él: estructura, scripts e instrucciones del proyecto. No listes la raíz ni releas README/CLAUDE.md salvo que necesites un detalle que no esté en el mapa. Si no lo tienes, lee README y, si existen, CLAUDE.md / AGENTS.md / docs de arquitectura.';
+export const EXPLORAR = [EXPLORAR_HEAD, EXPLORAR_MAPA, ...EXPLORAR_STEPS,
+  '6. Si tienes las «Notas del proyecto», tenlas en cuenta (compruébalas con el código). Si descubres algo duradero que ahorraría trabajo en futuras tareas (una convención, dónde vive un módulo clave, cómo se prueba algo) y no está ni en el mapa ni en las notas, propónlo con proponer_nota si la tienes (como mucho 2).',
+].join('\n');
+// Versiones anteriores, para actualizar los agentes ya creados que no se hayan tocado: v2 sin notas…
+export const EXPLORAR_V2 = [EXPLORAR_HEAD, EXPLORAR_MAPA, ...EXPLORAR_STEPS].join('\n');
+// … y v1, sin mapa
 export const EXPLORAR_V1 = [EXPLORAR_HEAD,
   '1. Lee README y, si existen, CLAUDE.md / AGENTS.md / docs de arquitectura: dicen cómo se organiza y cómo se llaman las cosas.',
   ...EXPLORAR_STEPS].join('\n');
 // Los simulados listan y buscan en la carpeta (si la reciben) para que se vean el permiso y las herramientas
 const MOCK_LIST = '{{ $json.body?.repo ? [{ name: "listar_ficheros", input: { ruta: $json.body.repo, profundidad: 2 } }, { name: "buscar_en_ficheros", input: { ruta: $json.body.repo, patron: "export|function", regex: true, maxResultados: 10 } }] : [] }}';
 const base = { provider: '', model: '', temperature: '0', maxTokens: '4096', output: 'JSON' };
+
+// Plan del Arquitecto. «rama» (opcional) la usa «Implementar feature» si no se le pasa una
+const ARQ_PLAN = { resumen: str, ficheros: list(obj({ fichero: str, cambio: { enum: ['crear', 'modificar', 'borrar'] }, detalle: str }, ['fichero', 'cambio', 'detalle'])), pasos: list(str), riesgos: list(str) };
+const ARQ_SCHEMA_V3 = schema(obj(ARQ_PLAN, ['resumen', 'ficheros', 'pasos']));
+// Respuesta simulada: lee la feature del disparador (en «Implementar feature» el Arquitecto no va justo detrás)
+const ARQ_MOCK_V3 = '{{ ({ resumen: "(simulado) Plan para: " + $json.body.feature.slice(0, 80), ficheros: [{ fichero: "src/ejemplo.js", cambio: "modificar", detalle: "(simulado) Punto de entrada de la feature" }, { fichero: "test/ejemplo.test.js", cambio: "crear", detalle: "(simulado) Tests de la feature" }], pasos: ["(simulado) Paso 1", "(simulado) Paso 2"], riesgos: ["(simulado) Sin LLM no hay análisis real"] }) }}';
+const ARQ_MOCK = '{{ ({ resumen: "(simulado) Plan para: " + $node["Inicio"].body.feature.slice(0, 80), rama: "feature/simulada", ficheros: [{ fichero: "src/ejemplo.js", cambio: "modificar", detalle: "(simulado) Punto de entrada de la feature" }, { fichero: "test/ejemplo.test.js", cambio: "crear", detalle: "(simulado) Tests de la feature" }], pasos: ["(simulado) Paso 1", "(simulado) Paso 2"], riesgos: ["(simulado) Sin LLM no hay análisis real"] }) }}';
+const ARQ_SCHEMA = schema(obj({ ...ARQ_PLAN, rama: { type: 'string', description: 'Nombre corto para la rama de la feature, en minúsculas y con guiones, con prefijo (p. ej. feature/exportar-csv)' } }, ['resumen', 'ficheros', 'pasos']));
 
 // ── Agentes (pantalla Agentes)
 export const CODING_AGENTS = {
@@ -85,8 +98,8 @@ export const CODING_AGENTS = {
     description: 'Convierte una feature en un plan técnico sobre el repositorio real (ficheros, pasos, riesgos).',
     config: { ...base, ...READ, mockTools: MOCK_LIST,
       prompt: 'Eres el arquitecto del proyecto. Recibes una feature y la carpeta del repositorio. Explora el código relacionado (como mucho 20 ficheros leídos) y diseña cómo implementarla respetando la estructura y el estilo existentes. Cita solo ficheros que existan o que haya que crear.' + '\n\n' + EXPLORAR,
-      schema: schema(obj({ resumen: str, ficheros: list(obj({ fichero: str, cambio: { enum: ['crear', 'modificar', 'borrar'] }, detalle: str }, ['fichero', 'cambio', 'detalle'])), pasos: list(str), riesgos: list(str) }, ['resumen', 'ficheros', 'pasos'])),
-      mockOutput: '{{ ({ resumen: "(simulado) Plan para: " + $json.body.feature.slice(0, 80), ficheros: [{ fichero: "src/ejemplo.js", cambio: "modificar", detalle: "(simulado) Punto de entrada de la feature" }, { fichero: "test/ejemplo.test.js", cambio: "crear", detalle: "(simulado) Tests de la feature" }], pasos: ["(simulado) Paso 1", "(simulado) Paso 2"], riesgos: ["(simulado) Sin LLM no hay análisis real"] }) }}' },
+      schema: ARQ_SCHEMA,
+      mockOutput: ARQ_MOCK },
   },
   desarrollador: {
     name: 'Coding · Desarrollador',
@@ -94,6 +107,20 @@ export const CODING_AGENTS = {
     config: { ...base, output: 'Texto', schema: '', tools: READ.tools, approveTools: 'Sí', maxTurns: '30', maxTokens: '8192', mockTools: '',
       prompt: 'Eres desarrollador del proyecto. Recibes una feature y su plan técnico. Localiza y lee los ficheros a modificar y escribe la propuesta de cambios en Markdown: por cada fichero, un apartado «## ruta/del/fichero» con el código nuevo o un bloque ```diff con los cambios, y una línea explicando el porqué. Respeta el estilo del código existente e incluye los tests. No digas que has aplicado nada: es una propuesta para revisar.' + '\n\n' + EXPLORAR,
       mockOutput: '{{ "# Propuesta de cambios (simulada)\\n\\n" + $json.ficheros.map(f => "## " + f.fichero + "\\n\\n```diff\\n+ // (simulado) " + f.detalle + "\\n```\\n").join("\\n") }}' },
+  },
+  implementador: {
+    name: 'Coding · Implementador',
+    description: 'Implementa una feature EDITANDO el repositorio (en la rama ya creada), ejecuta los tests y corrige lo que falle. No usa git ni formatea: eso lo hacen otros nodos.',
+    config: { ...base, output: 'Texto', schema: '', tools: `${READ.tools}, editar_fichero, crear_fichero, ejecutar_comando`, approveTools: 'No', maxTurns: '60', maxTokens: '8192', mockTools: '',
+      prompt: [
+        'Eres desarrollador del proyecto y vas a IMPLEMENTAR una feature editando el repositorio. Ya estás en su rama: no ejecutes git, ni formateadores, ni instales dependencias.',
+        '1. Sigue el plan técnico; si algo del plan no cuadra con el código real, adáptalo y explícalo en el resumen.',
+        '2. Antes de cambiar un fichero, lee la zona con leer_fichero. Cambia con editar_fichero en trozos pequeños (texto_antiguo copiado literalmente, sin números de línea) y crea los ficheros nuevos con crear_fichero.',
+        '3. Respeta el estilo existente (nombres, comentarios, idioma, estructura de módulos) y añade o actualiza los tests.',
+        '4. Al terminar, ejecuta el comando de tests indicado con ejecutar_comando. Si fallan por tu cambio, corrígelo y vuelve a ejecutarlos (como mucho 3 veces). Si fallan por algo ajeno a tu cambio, no lo toques y dilo.',
+        '5. Responde con un resumen en Markdown: ficheros cambiados o creados y por qué, decisiones tomadas y el resultado final de los tests.',
+      ].join('\n') + '\n\n' + EXPLORAR,
+      mockOutput: '## Implementación (simulada)\n\nSin LLM no se ha editado ningún fichero: configura un proveedor para implementar de verdad.' },
   },
   explorador: {
     name: 'Coding · Explorador',
@@ -242,6 +269,41 @@ export const CODING = {
     };
   },
 
+  codingImplement() {
+    const a = agents();
+    const I = '$node["Inicio"].body';
+    // Nombre de rama: el de body.rama, si no el que propone el Arquitecto, si no a partir de la feature.
+    // Solo minúsculas, números, «-», «_» y «/», con prefijo feature/ (o fix/, chore/…): va a la línea de comandos.
+    const BRANCH = `(() => { let r = String(${I}.rama || $node["Arquitecto"].rama || ${I}.feature || "feature").toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").replace(/[^a-z0-9\\/_-]+/g, "-").replace(/-*\\/-*/g, "/").replace(/\\/{2,}/g, "/").replace(/-{2,}/g, "-").replace(/^[-\\/_]+/, "").slice(0, 60).replace(/[-\\/_]+$/, ""); return /^(feature|fix|chore|refactor|docs|test)\\/./.test(r) ? r : "feature/" + (r || "nueva"); })()`;
+    const RAMA = '$node["Crear rama"].comando.replace("git switch -c ", "")';
+    return {
+      name: 'Coding · Implementar feature', collection: COL,
+      description: 'Implementa una feature EN el repositorio: comprueba que no hay cambios sin confirmar, el «Arquitecto» planifica y propone la rama, se crea la rama (git switch -c), el «Implementador» edita el código y pasa los tests, se aplica el formateador del proyecto a lo cambiado, se revisa el diff real y se guarda un informe. Los cambios quedan en la rama, SIN commit, para que los revises. La primera vez pedirá permiso de escritura en el repo y para los comandos (y para crear cada rama).',
+      graph: {
+        settings: test({ body: { repo: REPO, feature: 'Exportar el listado de ejecuciones a CSV, respetando los filtros de workflow y estado.', rama: '', tests: 'npm test', informe: path.join(POC, 'implementacion-feature.md') } }),
+        nodes: [hook('i1', '/coding-implementar'),
+          { id: 'i2', type: 'command', name: 'Estado del repo', x: 300, y: 200, exec: ex('60 s'), params: { comando: 'git status --porcelain', carpeta: '{{ $json.body.repo }}', failOnError: 'Sí' } },
+          { id: 'i3', type: 'if', name: '¿Sin cambios?', x: 560, y: 200, exec: ex(), params: { expr: '$json.salida.trim() === ""' } },
+          { id: 'i4', type: 'node', name: 'Hay cambios sin confirmar', x: 820, y: 340, exec: ex('10 s'), params: code([
+            'throw new Error("El repositorio tiene cambios sin confirmar: confírmalos o guárdalos (git stash) antes de implementar una feature.\\n" + $json.salida.slice(0, 1500));',
+          ]) },
+          agentNode('i5', a.arquitecto, 820, 100, `Repositorio: {{ ${I}.repo }}\n\nFeature:\n{{ ${I}.feature }}`, { extraPrompt: 'Propón también en «rama» un nombre corto para la rama de la feature.' }),
+          { id: 'i6', type: 'command', name: 'Crear rama', x: 1080, y: 100, exec: ex('60 s'), params: { comando: `{{ "git switch -c " + ${BRANCH} }}`, carpeta: `{{ ${I}.repo }}`, failOnError: 'Sí' } },
+          agentNode('i7', a.implementador, 1340, 100, `{{ "Repositorio: " + ${I}.repo + "\\nRama: " + ${RAMA} + " (ya creada y activa)\\nComando de tests: " + (${I}.tests || "npm test") + "\\n\\nFeature:\\n" + ${I}.feature + "\\n\\nPlan técnico:\\n" + JSON.stringify($node["Arquitecto"], null, 2) }}`),
+          { id: 'i8', type: 'format', name: 'Formatear', x: 1600, y: 100, exec: ex('5 min'), params: { carpeta: `{{ ${I}.repo }}`, comando: '', conFicheros: 'Sí', failOnError: 'No' } },
+          { id: 'i9', type: 'command', name: 'Tests finales', x: 1860, y: 100, exec: ex('15 min'), params: { comando: `{{ ${I}.tests || "npm test" }}`, carpeta: `{{ ${I}.repo }}`, failOnError: 'No' } },
+          { id: 'i10', type: 'command', name: 'Diff', x: 2120, y: 100, exec: ex('60 s'), params: { comando: 'git diff', carpeta: `{{ ${I}.repo }}`, failOnError: 'Sí' } },
+          agentNode('i11', a.revisor, 2380, 100, `{{ "Feature: " + ${I}.feature + "\\nRama: " + ${RAMA} + "\\nRepositorio: " + ${I}.repo + "\\n\\nResumen del implementador:\\n" + $node["Implementador"].text + "\\n\\nTests finales (" + ($node["Tests finales"].ok ? "OK" : "FALLAN, código " + $node["Tests finales"].codigo) + "):\\n" + $node["Tests finales"].salida.slice(-3000) + "\\n\\nFicheros cambiados o nuevos: " + $node["Formatear"].todos.join(", ") + "\\n\\nDiff (los ficheros nuevos no salen: léelos):\\n" + $json.salida.slice(0, 60000) }}`,
+            { extraPrompt: 'Revisa SOLO los cambios de esta rama (el diff y los ficheros nuevos, que puedes leer): que cumplan la feature, que no rompan nada evidente y que incluyan tests. Ten en cuenta el resultado de los tests.' }),
+          { id: 'i12', type: 'file', name: 'Informe', x: 2640, y: 100, exec: ex(), params: { action: 'Escribir', path: `{{ ${I}.informe }}`, format: 'Texto', ifMissing: 'Fallar', ifExists: 'Sobrescribir',
+            content: `{{ ["# Implementación: " + ${I}.feature, "", "Rama: \`" + ${RAMA} + "\` (cambios sin commit) · Repositorio: " + ${I}.repo, "", "## Resumen del implementador", "", $node["Implementador"].text, "", "## Tests finales: " + ($node["Tests finales"].ok ? "OK" : "FALLAN (código " + $node["Tests finales"].codigo + ")"), "", "## Formateo", ($node["Formatear"].formateador ? $node["Formatear"].motivo + " · formateados: " + ($node["Formatear"].cambiados.join(", ") || "ninguno") : "Sin formateador: " + $node["Formatear"].motivo), "", "## Revisión (" + $json.veredicto + ")", "", $json.resumen, "", ...$json.hallazgos.map(h => "- **" + h.severidad + "** " + (h.fichero ? "\`" + h.fichero + "\` " : "") + h.problema + (h.propuesta ? " → " + h.propuesta : "")), "", "## Ficheros cambiados o nuevos", "", ...$node["Formatear"].todos.map(f => "- " + f)].join("\\n") }}` } },
+          { id: 'i13', type: 'approval', name: 'Revisar cambios', x: 2900, y: 100, exec: ex(), params: { assignee: 'desarrollador', channel: 'Panel', timeout: '1 d' } }],
+        edges: [...chain('ie', ['i1', 'i2', 'i3']), { id: 'ie3', from: 'i3', to: 'i5', port: 'true' }, { id: 'ie4', from: 'i3', to: 'i4', port: 'false' },
+          ...chain('iz', ['i5', 'i6', 'i7', 'i8', 'i9', 'i10', 'i11', 'i12', 'i13'])],
+      },
+    };
+  },
+
   codingCommit() {
     return {
       name: 'Coding · Revisar último commit', collection: COL,
@@ -269,19 +331,24 @@ export const CODING = {
   },
 };
 
-// Actualiza lo creado por versiones anteriores (los ejemplos se crean una sola vez). v2: mapa del repo.
-// Solo toca lo que el usuario no ha cambiado: el prompt de un agente si sigue siendo el original, las
-// herramientas del Desarrollador si siguen siendo las de antes, y añade el parámetro repo a los nodos
-// Agente de la colección que no lo tengan.
+// Actualiza lo creado por versiones anteriores (los ejemplos se crean una sola vez). v2: mapa del repo;
+// v3: notas del proyecto (proponer_nota); v4: el Arquitecto propone la rama (Implementar feature). Solo toca lo que el usuario no ha cambiado: el prompt de un agente
+// si sigue siendo uno de los originales, las herramientas si siguen siendo las de antes, y añade el
+// parámetro repo a los nodos Agente de la colección que no lo tengan.
+const CODING_VERSION = 4;
+const OLD_TOOLS = ['buscar_ficheros, buscar_en_ficheros, leer_fichero', READ_V2];
 export function upgradeCoding() {
-  if ((Settings.get('codingVersion', 1) || 1) >= 2) return;
+  if ((Settings.get('codingVersion', 1) || 1) >= CODING_VERSION) return;
   const readers = new Set();
   for (const def of Object.values(A)) {
     const cur = Agents.findByName(def.name);
     if (!cur) continue;
     const patch = {};
-    if (def.config.prompt && cur.config.prompt === def.config.prompt.replace(EXPLORAR, EXPLORAR_V1)) patch.prompt = def.config.prompt;
-    if (def === A.desarrollador && cur.config.tools === 'buscar_ficheros, buscar_en_ficheros, leer_fichero') patch.tools = READ.tools;
+    const olds = def.config.prompt?.includes(EXPLORAR) ? [EXPLORAR_V1, EXPLORAR_V2].map(v => def.config.prompt.replace(EXPLORAR, v)) : [];
+    if (olds.includes(cur.config.prompt)) patch.prompt = def.config.prompt;
+    if (def.config.tools === READ.tools && OLD_TOOLS.includes(cur.config.tools)) patch.tools = READ.tools;
+    if (def === A.arquitecto && cur.config.schema === ARQ_SCHEMA_V3) patch.schema = ARQ_SCHEMA;
+    if (def === A.arquitecto && cur.config.mockOutput === ARQ_MOCK_V3) patch.mockOutput = ARQ_MOCK;
     if (Object.keys(patch).length) updateAgent(cur.id, { config: patch });
     if (patch.tools || cur.config.tools) readers.add(cur.id);
   }
@@ -294,5 +361,5 @@ export function upgradeCoding() {
     });
     if (changed) Workflows.update(w.id, { graph: { ...w.graph, nodes } });
   }
-  Settings.set('codingVersion', 2);
+  Settings.set('codingVersion', CODING_VERSION);
 }

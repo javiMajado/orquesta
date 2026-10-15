@@ -3,13 +3,13 @@
 export const CAPS = {
   webhook: 'orq', cron: 'orq', event: 'orq',
   agent: 'llm',
-  node: 'node', http: 'node', email: 'node', file: 'node', command: 'node',
+  node: 'node', http: 'node', email: 'node', file: 'node', command: 'node', format: 'node',
   db: 'db',
   if: 'orq', loop: 'orq', parallel: 'orq', wait: 'orq', subflow: 'orq',
   approval: 'human',
 };
 export const TRIGGERS = ['webhook', 'cron', 'event'];
-export const ACTION_TYPES = ['agent', 'node', 'http', 'db', 'email', 'file', 'command'];
+export const ACTION_TYPES = ['agent', 'node', 'http', 'db', 'email', 'file', 'command', 'format'];
 
 // "60 s", "5 minutos", "4 h", 1500 → milisegundos
 export function parseDuration(v, def = 60000) {

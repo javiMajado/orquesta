@@ -182,3 +182,31 @@ export async function repoMap(root, { env = process.env } = {}) {
   memory.set(key, { map, at: Date.now() });
   return map;
 }
+
+// Commit actual del repositorio (o null sin git)
+export const headOf = async root => (await git(root, ['rev-parse', 'HEAD']))?.trim() || null;
+
+// Notas del proyecto que pueden estar desactualizadas: las que citan ficheros que han cambiado desde el
+// commit en que se escribieron. Devuelve, por índice de nota, la lista de ficheros cambiados (o null si no
+// se ha podido comprobar, p. ej. un commit que ya no existe).
+export async function staleNotes(root, notes) {
+  const out = new Map();
+  const byCommit = new Map();
+  notes.forEach((n, i) => {
+    if (!n.paths?.length || !n.commit) return;
+    // Solo un hash: nada que git pudiera tomar por una opción
+    if (!/^[0-9a-f]{7,40}$/i.test(n.commit)) { out.set(i, null); return; }
+    (byCommit.get(n.commit) || byCommit.set(n.commit, []).get(n.commit)).push(i);
+  });
+  for (const [commit, idx] of byCommit) {
+    const paths = [...new Set(idx.flatMap(i => notes[i].paths))];
+    const diff = await git(root, ['diff', '--name-only', `${commit}`, 'HEAD', '--', ...paths]);
+    const changed = diff == null ? null : diff.split('\n').map(s => s.trim()).filter(Boolean);
+    for (const i of idx) {
+      if (changed == null) { out.set(i, null); continue; }
+      const mine = changed.filter(c => notes[i].paths.some(p => c === p || c.startsWith(p.replace(/\/?$/, '/'))));
+      if (mine.length) out.set(i, mine);
+    }
+  }
+  return out;
+}

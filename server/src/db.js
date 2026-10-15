@@ -55,6 +55,16 @@ CREATE TABLE IF NOT EXISTS batches (
   started_at INTEGER, finished_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS batches_ds ON batches (dataset_id, started_at DESC);
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, path TEXT NOT NULL, description TEXT DEFAULT '',
+  settings TEXT DEFAULT '{}', created_at INTEGER, updated_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS project_notes (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, text TEXT NOT NULL,
+  paths TEXT DEFAULT '[]', commit_ref TEXT, source TEXT, status TEXT DEFAULT 'propuesta', run_id TEXT,
+  created_at INTEGER, updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS notes_project ON project_notes (project_id, status, created_at);
 `);
 
 // Sentencias preparadas una sola vez y reutilizadas
@@ -207,6 +217,50 @@ export const Agents = {
     return this.get(id);
   },
   remove: id => q('DELETE FROM agents WHERE id = ?').run(id).changes > 0,
+};
+
+// Proyectos: un repositorio (carpeta) con el que trabajan los workflows. Sus notas son memoria para los
+// agentes: las propone un agente o el usuario y solo se usan las aprobadas (status «aprobada»).
+const rowProject = r => r && ({ id: r.id, name: r.name, path: r.path, description: r.description || '', settings: p(r.settings) || {}, createdAt: r.created_at, updatedAt: r.updated_at });
+export const Projects = {
+  list: () => q('SELECT * FROM projects ORDER BY name').all().map(rowProject),
+  get: id => rowProject(q('SELECT * FROM projects WHERE id = ?').get(id)),
+  findByName: name => rowProject(q('SELECT * FROM projects WHERE name = ?').get(name)),
+  create({ name, path, description = '', settings = {} }) {
+    const id = newId('pr'), now = Date.now();
+    q('INSERT INTO projects (id, name, path, description, settings, created_at, updated_at) VALUES (?,?,?,?,?,?,?)').run(id, name, path, description, j(settings), now, now);
+    return this.get(id);
+  },
+  update(id, { name, path, description, settings }) {
+    const cur = this.get(id);
+    if (!cur) return null;
+    q('UPDATE projects SET name=?, path=?, description=?, settings=?, updated_at=? WHERE id=?')
+      .run(name ?? cur.name, path ?? cur.path, description ?? cur.description, j(settings ?? cur.settings), Date.now(), id);
+    return this.get(id);
+  },
+  remove: id => q('DELETE FROM projects WHERE id = ?').run(id).changes > 0,
+};
+const rowNote = r => r && ({ id: r.id, projectId: r.project_id, text: r.text, paths: p(r.paths) || [], commitRef: r.commit_ref || null, source: r.source || '', status: r.status, runId: r.run_id || null, createdAt: r.created_at, updatedAt: r.updated_at });
+export const Notes = {
+  byProject: (projectId, status) => (status
+    ? q('SELECT * FROM project_notes WHERE project_id = ? AND status = ? ORDER BY created_at').all(projectId, status)
+    : q('SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at').all(projectId)).map(rowNote),
+  counts: () => q("SELECT project_id AS id, SUM(status = 'aprobada') AS aprobadas, SUM(status = 'propuesta') AS propuestas FROM project_notes GROUP BY project_id").all(),
+  get: id => rowNote(q('SELECT * FROM project_notes WHERE id = ?').get(id)),
+  create({ projectId, text, paths = [], commitRef = null, source = '', status = 'propuesta', runId = null }) {
+    const id = newId('nt'), now = Date.now();
+    q('INSERT INTO project_notes (id, project_id, text, paths, commit_ref, source, status, run_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(id, projectId, text, j(paths), commitRef, source, status, runId, now, now);
+    return this.get(id);
+  },
+  update(id, { text, paths, status, commitRef }) {
+    const cur = this.get(id);
+    if (!cur) return null;
+    q('UPDATE project_notes SET text=?, paths=?, status=?, commit_ref=?, updated_at=? WHERE id=?')
+      .run(text ?? cur.text, j(paths ?? cur.paths), status ?? cur.status, commitRef === undefined ? cur.commitRef : commitRef, Date.now(), id);
+    return this.get(id);
+  },
+  remove: id => q('DELETE FROM project_notes WHERE id = ?').run(id).changes > 0,
 };
 
 // Conjuntos de datos de prueba (por workflow) y sus casos. Un caso guarda SOLO lo que difiere de los

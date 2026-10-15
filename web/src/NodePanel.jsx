@@ -411,6 +411,29 @@ export function Field({ f, value, onChange, workflows = [], onFocus }) {
   );
 }
 
+// Proyecto del workflow: sus agentes trabajan sobre su carpeta y reciben el mapa y las notas aprobadas
+function ProjectSelect({ value, onChange, onLeave }) {
+  const [list, setList] = useState(null);
+  useEffect(() => { api('/projects').then(setList).catch(() => setList([])); }, []);
+  const cur = list?.find(p => p.id === value);
+  const go = href => (onLeave ? onLeave(href) : (location.hash = href));
+  return (
+    <div className="field">
+      <label>Proyecto</label>
+      <select className="input" value={value} onChange={e => onChange(e.target.value)}>
+        <option value="">Sin proyecto</option>
+        {(list || []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        {value && list && !cur && <option value={value}>{value} · no existe</option>}
+      </select>
+      <small className="help">
+        {cur ? <><span className="mono">{cur.path}</span> · {cur.notes.aprobadas} nota{cur.notes.aprobadas === 1 ? '' : 's'}. </> : ''}
+        Sus agentes trabajan sobre la carpeta del proyecto (si su «Repositorio» está vacío) y reciben el mapa y las notas aprobadas. En expresiones: <span className="mono">$project.path</span>. Un webhook puede elegir otro con <span className="mono">body.project</span>.{' '}
+        <a href="#/projects" onClick={e => { e.preventDefault(); go(cur ? `#/projects/${cur.id}` : '#/projects'); }}>{cur ? 'Ver proyecto' : 'Gestionar proyectos'}</a>
+      </small>
+    </div>
+  );
+}
+
 // Ancho del panel lateral: se arrastra desde su borde izquierdo y se recuerda (por navegador)
 const W_KEY = 'orq.panelWidth', W_MIN = 300, W_NARROW = 328, W_WIDE = 620;
 const maxWidth = () => Math.max(W_MIN, Math.min(1100, Math.round(window.innerWidth * 0.7)));
@@ -481,6 +504,7 @@ export default function NodePanel({ node, step, workers, workflows, wf, graph, s
             <datalist id="wf-collections">{[...new Set(workflows.map(w => w.collection).filter(Boolean))].map(c => <option key={c} value={c} />)}</datalist>
             <small className="help">Agrupa los workflows en la lista. Escribe una nueva o elige una existente.</small>
           </div>
+          <ProjectSelect value={graph.settings?.project || ''} onChange={v => onSettings({ project: v })} onLeave={onLeave} />
           <div className="llm-box">
             <i className="ph ph-flask" />
             <div>

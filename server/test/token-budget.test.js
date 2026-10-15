@@ -45,9 +45,9 @@ test('upgradeCoding: actualiza prompts sin tocar, herramientas del Desarrollador
   assert.equal(Agents.get(a1.id).config.prompt, rev.config.prompt, 'prompt original → versión con mapa');
   assert.match(Agents.get(a1.id).config.prompt, /Mapa del repositorio/);
   assert.equal(Agents.get(a2.id).config.prompt, 'Prompt cambiado por el usuario', 'prompt del usuario intacto');
-  assert.equal(Agents.get(a2.id).config.tools, 'listar_ficheros, buscar_ficheros, buscar_en_ficheros, leer_fichero');
+  assert.equal(Agents.get(a2.id).config.tools, 'listar_ficheros, buscar_ficheros, buscar_en_ficheros, leer_fichero, proponer_nota');
   const nodes = Workflows.get(wf.id).graph.nodes;
   assert.equal(nodes[0].params.repo, '{{ $node["Inicio"].body.repo }}');
   assert.equal(nodes[1].params.repo, 'C:/otro', 'no pisa un repo ya puesto');
-  assert.equal(Settings.get('codingVersion'), 2);
+  assert.equal(Settings.get('codingVersion'), 4);
 });

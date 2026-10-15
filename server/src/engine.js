@@ -8,6 +8,7 @@ import { notifyApproval } from './notify.js';
 import { resolveLlm, llmCacheMode } from './llm.js';
 import { resolveForWorker } from './connections.js';
 import { applyAgent } from './agents.js';
+import { resolveProject, notesForAgent, addNote } from './projects.js';
 import { grant, grantsForWorker } from './grants.js';
 import { env } from './env.js';
 
@@ -36,7 +37,8 @@ export class Engine extends EventEmitter {
   // no se lanzan y los bucles hacen solo su primer elemento. La salida de la ejecución es la de ese nodo.
   // parentStep: { stepId, stepEvt } del nodo Sub-workflow que lanza esta ejecución (para reflejar en él sus esperas)
   // overrides: ajustes del nodo Sub-workflow sobre los nodos de este workflow, solo para esta ejecución
-  start(workflowId, { mode = 'manual', input = {}, triggerNodeId, parentRunId, parentStep, stopAt, overrides, caseId, batchId } = {}) {
+  // project: proyecto heredado (sub-workflow); manda body.project del disparador y luego el del workflow
+  start(workflowId, { mode = 'manual', input = {}, triggerNodeId, parentRunId, parentStep, stopAt, overrides, caseId, batchId, project } = {}) {
     const wf = Workflows.get(workflowId);
     if (!wf) throw Object.assign(new Error('Workflow no encontrado'), { status: 404 });
     const { graph: g, applied } = applyOverrides({ nodes: [], edges: [], ...(wf.graph || {}) }, overrides);
@@ -53,15 +55,21 @@ export class Engine extends EventEmitter {
       : g.nodes.find(n => TRIGGERS.includes(n.type) && (!only || only.has(n.id)));
     if (!trig) throw new Error(only ? 'Ese nodo no está conectado a ningún disparador' : 'El workflow no tiene ningún disparador');
 
+    const askedProject = input?.body?.project || g.settings?.project || null;
+    const proj = askedProject ? resolveProject(askedProject) : project || null;
+    if (askedProject && !proj) throw Object.assign(new Error(`El proyecto «${askedProject}» no existe`), { status: 400 });
+
     const run = Runs.create({ workflowId: wf.id, workflowName: wf.name, mode, input, parentRunId, caseId, batchId });
     const ctx = {
       runId: run.id, wf, g, byId: Object.fromEntries(g.nodes.map(n => [n.id, n])),
       byName: {}, tokens: 0, cancelled: false, approvals: new Map(), merges: new Map(), timers: new Set(), children: [],
       only, stopAt: stopAt || null, parentRunId: parentRunId || null, parentStep: parentStep || null, waits: 0,
+      project: proj ? { id: proj.id, name: proj.name, path: proj.path } : null,
     };
     this.active.set(run.id, ctx);
     this.emitRun(run.id);
     this.log(ctx, 'info', null, 'orquestador', `Ejecución (${mode}) de «${wf.name}» · estrategia ${this.registry.strategy}`);
+    if (ctx.project) this.log(ctx, 'info', null, 'orquestador', `Proyecto «${ctx.project.name}» · ${ctx.project.path}`);
     if (applied.length) this.log(ctx, 'info', null, 'orquestador', `Ajustes del nodo Sub-workflow en: ${applied.map(n => `«${n}»`).join(', ')} (solo en esta ejecución)`);
     if (only) this.log(ctx, 'info', null, 'orquestador', `Ejecutar hasta «${g.nodes.find(n => n.id === stopAt).name}»: solo ese nodo y los anteriores (${only.size} nodos)`);
 
@@ -131,7 +139,7 @@ export class Engine extends EventEmitter {
 
   async execute(ctx, node, input, scope, h) {
     const p = node.params || {};
-    const ectx = { $json: input, $input: input, $node: ctx.byName, $run: { id: ctx.runId, workflow: ctx.wf.name }, $env: publicEnv() };
+    const ectx = { $json: input, $input: input, $node: ctx.byName, $run: { id: ctx.runId, workflow: ctx.wf.name }, $env: publicEnv(), $project: ctx.project };
     const orq = () => { Steps.update(h.stepId, { worker: 'orquestador' }); h.stepEvt({ status: 'running', worker: 'orquestador' }); };
 
     switch (node.type) {
@@ -192,7 +200,7 @@ export class Engine extends EventEmitter {
         const target = Workflows.get(p.workflow) || Workflows.findByName(p.workflow);
         if (!target) throw new Error(`Sub-workflow «${p.workflow}» no encontrado`);
         if (target.id === ctx.wf.id) throw new Error('Un workflow no puede invocarse a sí mismo');
-        const child = this.start(target.id, { mode: 'subflow', input, parentRunId: ctx.runId, parentStep: h, overrides: p.overrides });
+        const child = this.start(target.id, { mode: 'subflow', input, parentRunId: ctx.runId, parentStep: h, overrides: p.overrides, project: ctx.project });
         ctx.children.push(child.runId);
         Steps.update(h.stepId, { childRunId: child.runId });
         h.stepEvt({ childRunId: child.runId });
@@ -231,6 +239,8 @@ export class Engine extends EventEmitter {
       params[autoField] = m.text;
       this.log(ctx, 'info', node.name, 'orquestador', `${{ input: 'Entrada', content: 'Contenido', body: 'Cuerpo' }[autoField]} automático: ${m.field ? `campo «${m.field}» del nodo anterior` : 'salida del nodo anterior'}`);
     }
+    // Proyecto de la ejecución: los agentes trabajan sobre su carpeta si el nodo no indica otra
+    if (node.type === 'agent' && ctx.project && (params.repo == null || String(params.repo).trim() === '')) params.repo = ctx.project.path;
     let provider;
     if (llm) {
       Object.assign(params, { provider: llm.provider, model: llm.model });
@@ -254,6 +264,12 @@ export class Engine extends EventEmitter {
 
     // Caché de prompts del proveedor (pantalla Workers: auto | on | off). Tras la revisión: no es un parámetro del nodo
     if (provider) params.promptCache = llmCacheMode(provider);
+    // … y sus notas aprobadas, que el worker pone junto al mapa del repositorio
+    if (node.type === 'agent' && ctx.project) {
+      const notes = notesForAgent(ctx.project.id);
+      Object.assign(params, { projectId: ctx.project.id, projectName: ctx.project.name, projectNotes: notes });
+      this.log(ctx, 'info', node.name, 'orquestador', `Proyecto «${ctx.project.name}» · ${notes.length} nota${notes.length === 1 ? '' : 's'} aprobada${notes.length === 1 ? '' : 's'}`);
+    }
 
     // Conexión a BD dada de alta en la UI: se añade DESPUÉS de la revisión humana para que la
     // contraseña no aparezca en la tarjeta de revisión (las del .env las resuelve el worker)
@@ -271,7 +287,8 @@ export class Engine extends EventEmitter {
       attempt++;
       try {
         const { output, worker, meta } = await this.registry.dispatch({
-          runId: ctx.runId, cap: CAPS[node.type], pin: exec.worker, provider, affKey: `${ctx.wf.id}:${node.id}`,
+          // Con proyecto, afinidad por proyecto: el mismo worker conserva su mapa y la caché del proveedor
+          runId: ctx.runId, cap: CAPS[node.type], pin: exec.worker, provider, affKey: ctx.project && node.type === 'agent' ? `project:${ctx.project.id}` : `${ctx.wf.id}:${node.id}`,
           nodeType: node.type, params, input, timeoutMs, grants: grantsForWorker(),
           onQueued: () => this.log(ctx, 'warn', node.name, 'orquestador', 'Todos los workers compatibles están ocupados · en cola'),
           onAssigned: w => {
@@ -282,12 +299,12 @@ export class Engine extends EventEmitter {
           onLog: (msg, wid) => this.log(ctx, 'info', node.name, wid, msg),
           onApproval: (req, wid) => this.toolApproval(ctx, node, h, req, wid),
         });
-        this.addMeta(ctx, stepId, stepEvt, meta);
+        this.addMeta(ctx, stepId, stepEvt, meta, node);
         this.log(ctx, 'ok', node.name, worker, 'Completado');
         return { output };
       } catch (err) {
         lastErr = err;
-        this.addMeta(ctx, stepId, stepEvt, err.meta);
+        this.addMeta(ctx, stepId, stepEvt, err.meta, node);
         if (err.cancelled || err instanceof NoWorkerError || ctx.cancelled) throw err;
         if (err.retryable === false) {
           if (attempt <= retries) this.log(ctx, 'warn', node.name, null, 'Error no recuperable · no se reintenta');
@@ -304,8 +321,20 @@ export class Engine extends EventEmitter {
   }
 
   // Guarda proveedor/modelo/tokens del paso y los suma al presupuesto de la ejecución
-  addMeta(ctx, stepId, stepEvt, meta) {
+  addMeta(ctx, stepId, stepEvt, meta, node) {
     if (!meta) return;
+    // Notas que el agente propone para el proyecto (herramienta proponer_nota): quedan pendientes de aprobar
+    if (ctx.project && Array.isArray(meta.notas) && meta.notas.length) {
+      let n = 0;
+      for (const nota of meta.notas) {
+        try { addNote(ctx.project.id, { text: nota.texto, paths: nota.ficheros, commitRef: nota.commit || null }, { source: `agente «${node?.name || 'Agente'}»`, runId: ctx.runId }); n++; }
+        catch (e) { this.log(ctx, 'warn', node?.name, 'orquestador', `Nota propuesta descartada: ${e.message}`); }
+      }
+      if (n) {
+        this.log(ctx, 'info', node?.name, 'orquestador', `${n} nota${n === 1 ? '' : 's'} propuesta${n === 1 ? '' : 's'} para el proyecto «${ctx.project.name}» · pendiente${n === 1 ? '' : 's'} de aprobar en Proyectos`);
+        this.emitEvt({ type: 'notes', projectId: ctx.project.id });
+      }
+    }
     // Presupuesto en tokens ponderados por coste (lo leído de caché cuenta ~10 %); workers antiguos: total
     const spent = meta.usage?.weighted ?? meta.usage?.total;
     if (spent) ctx.tokens += spent;

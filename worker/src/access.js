@@ -90,6 +90,17 @@ export function makeAccess({ env = process.env, grants = null, requestApproval =
       return real;
     },
 
+    // Carpeta existente en la que se va a escribir (p. ej. para crear subcarpetas y ficheros dentro)
+    async dirWrite(p) {
+      if (!p || typeof p !== 'string') throw fail('Falta la carpeta');
+      if (!path.isAbsolute(p)) throw fail(`Usa una ruta absoluta: ${p}`);
+      let real;
+      try { real = await fs.realpath(path.resolve(p)); } catch { throw fail(`No existe la carpeta ${p}`); }
+      if (!(await fs.stat(real)).isDirectory()) throw fail(`No es una carpeta: ${p}`);
+      await check(real, { write: true, dir: true, shown: p });
+      return real;
+    },
+
     // Ruta real de la carpeta si ya se puede leer, o null. Nunca pide permiso (lo usa el mapa del repo)
     async readable(p) {
       if (!p || typeof p !== 'string' || !path.isAbsolute(p)) return null;

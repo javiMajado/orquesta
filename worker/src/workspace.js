@@ -155,6 +155,63 @@ export async function readText({ ruta, desde = 1, lineas = 400 } = {}, { env = p
   return { ruta: target, lineas: `${from}-${hasta} de ${all.length}`, ...(hasta < all.length ? { siguiente: hasta + 1 } : {}), texto };
 }
 
+// ── Escritura (herramientas editar_fichero y crear_fichero de los agentes)
+// Necesitan permiso de escritura en la carpeta (si falta, se pide). Nunca dentro de carpetas omitidas
+// (node_modules, .git…) ni en ficheros que suelen tener secretos.
+const MAX_WRITE = 1024 * 1024;
+function guardWrite(target) {
+  if (target.split(path.sep).some(seg => IGNORE.has(seg))) throw fail(`No se escribe dentro de ${target.split(path.sep).find(seg => IGNORE.has(seg))}/: ${target}`);
+  if (SECRET_FILE.test(path.basename(target))) throw fail(`No se escriben ficheros que suelen contener secretos: ${path.basename(target)}`);
+}
+const countOf = (text, part) => { let n = 0; for (let i = text.indexOf(part); i !== -1; i = text.indexOf(part, i + part.length)) n++; return n; };
+
+// Sustituye un trozo exacto de un fichero existente. Debe aparecer una sola vez (salvo todas: true).
+// Respeta los saltos de línea del fichero (CRLF/LF) y su BOM.
+export async function editText({ ruta, texto_antiguo, texto_nuevo = '', todas = false } = {}, { env = process.env, access = makeAccess({ env }) } = {}) {
+  const target = await access.file(ruta, { write: true });
+  guardWrite(target);
+  const st = await fs.stat(target).catch(() => null);
+  if (!st?.isFile()) throw fail(`No existe el fichero ${target}: para uno nuevo usa crear_fichero`);
+  if (st.size > MAX_WRITE) throw fail(`El fichero es demasiado grande para editarlo (${st.size.toLocaleString('es')} bytes)`);
+  const buf = await fs.readFile(target);
+  if (buf.subarray(0, 8000).includes(0)) throw fail(`Es un fichero binario: ${target}`);
+  let text = buf.toString('utf8');
+  const bom = text.startsWith('﻿');
+  if (bom) text = text.slice(1);
+  const crlf = text.includes('\r\n');
+  const norm = s => { const t = String(s ?? '').replace(/\r\n/g, '\n'); return crlf ? t.replace(/\n/g, '\r\n') : t; };
+  const oldS = norm(texto_antiguo), newS = norm(texto_nuevo);
+  if (!oldS) throw fail('Falta texto_antiguo: el trozo exacto a sustituir (para un fichero nuevo usa crear_fichero)');
+  if (oldS === newS) throw fail('texto_antiguo y texto_nuevo son iguales: no hay nada que cambiar');
+  const n = countOf(text, oldS);
+  if (!n) throw fail(`No se encuentra texto_antiguo en ${target}. Léelo antes con leer_fichero y cópialo exactamente (espacios, sangría y saltos de línea incluidos), sin los números de línea`);
+  if (n > 1 && !todas) throw fail(`texto_antiguo aparece ${n} veces en ${target}: añade líneas de alrededor para que sea único, o usa todas: true para cambiarlas todas`);
+  const at = text.indexOf(oldS);
+  const linea = text.slice(0, at).split('\n').length;
+  text = todas ? text.split(oldS).join(newS) : text.slice(0, at) + newS + text.slice(at + oldS.length);
+  await fs.writeFile(target, (bom ? '﻿' : '') + text, 'utf8');
+  return { ruta: target, sustituciones: todas ? n : 1, linea };
+}
+
+// Crea un fichero nuevo (y las carpetas que falten). Si ya existe, falla: para cambiarlo, editar_fichero.
+export async function createText({ ruta, contenido = '' } = {}, { env = process.env, access = makeAccess({ env }) } = {}) {
+  if (!ruta || typeof ruta !== 'string' || !path.isAbsolute(ruta)) throw fail(`Usa una ruta absoluta: ${ruta || '(vacía)'}`);
+  const abs = path.resolve(ruta);
+  guardWrite(abs);
+  if (await fs.stat(abs).catch(() => null)) throw fail(`Ya existe ${abs}: para cambiarlo usa editar_fichero`);
+  const text = String(contenido ?? '');
+  if (Buffer.byteLength(text) > MAX_WRITE) throw fail('El contenido es demasiado grande');
+  // La carpeta existente más cercana debe permitir escritura; las que falten se crean dentro de ella
+  let dir = path.dirname(abs);
+  while (!(await fs.stat(dir).catch(() => null))) { const up = path.dirname(dir); if (up === dir) break; dir = up; }
+  await access.dirWrite(dir);
+  await fs.mkdir(path.dirname(abs), { recursive: true });
+  const target = await access.file(abs, { write: true });
+  guardWrite(target);
+  await fs.writeFile(target, text, { encoding: 'utf8', flag: 'wx' });
+  return { ruta: target, lineas: text ? text.split('\n').length : 0 };
+}
+
 const cleanEnv = src => Object.fromEntries(Object.entries(src).filter(([k]) => !SECRET_ENV.test(k)));
 
 function killTree(child) {

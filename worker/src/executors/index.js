@@ -9,4 +9,5 @@ export const executors = {
   email: lazy('./email.js'),
   file: lazy('./file.js'),
   command: lazy('./command.js'),
+  format: lazy('./format.js'),
 };
