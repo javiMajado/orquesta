@@ -23,9 +23,8 @@ function estimate(n, x, seen) {
   const p = n.params || {};
   const before = () => incoming(n.id, x, seen)?.value;
   switch (n.type) {
-    case 'webhook': return { value: parseJson(x.testInput) ?? {}, note: 'según los Datos de prueba' };
+    case 'webhook': case 'event': return { value: parseJson(x.testInput) ?? {}, note: x.testLabel || 'según el caso de prueba activo' };
     case 'cron': return { value: { disparado: 'fecha y hora de la ejecución' } };
-    case 'event': return { value: { topic: p.topic || 'tópico', payload: 'datos del evento' } };
     case 'agent': {
       const c = p.agentId ? x.agents[p.agentId]?.config || {} : p;
       if (c.output !== 'JSON') return { value: { text: 'respuesta del agente' } };
@@ -135,11 +134,11 @@ export function AutoHint({ node, graph, steps, testInput, value }) {
 }
 
 // «Datos disponibles»: lo que recibe el nodo ($json) y lo de los nodos anteriores ($node["…"])
-export function DataPicker({ node, graph, steps, testInput, onPick, onRunUntil }) {
+export function DataPicker({ node, graph, steps, testInput, testLabel, onPick, onRunUntil }) {
   const agents = useAgents();
   const [open, setOpen] = useState(true);
   if (TRIGGERS.includes(node.type)) return null;
-  const x = { graph, steps, testInput, agents, byId: Object.fromEntries(graph.nodes.map(n => [n.id, n])) };
+  const x = { graph, steps, testInput, testLabel, agents, byId: Object.fromEntries(graph.nodes.map(n => [n.id, n])) };
   const inc = incoming(node.id, x);
   const others = ancestors(node.id, x).filter(n => n.id !== inc?.from?.id);
   const missing = [inc, ...others.map(n => outputOf(n, x))].some(o => o && !o.real);
@@ -177,7 +176,7 @@ export function DataPicker({ node, graph, steps, testInput, onPick, onRunUntil }
           })}
           <small className="help">Haz clic en un campo para insertarlo donde tengas el cursor (o se copia).</small>
           {missing && onRunUntil && (
-            <button type="button" className="btn btn-secondary btn-sm" onClick={() => onRunUntil(inc.from.id)} title={`Ejecuta el flujo solo hasta «${inc.from.name}» (lo anterior a este nodo) con los Datos de prueba`}>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => onRunUntil(inc.from.id)} title={`Ejecuta el flujo solo hasta «${inc.from.name}» (lo anterior a este nodo) con el caso de prueba activo`}>
               <i className="ph ph-play" />Obtener datos reales (ejecutar hasta «{inc.from.name}»)
             </button>
           )}

@@ -20,7 +20,8 @@ function checkAuth(node, req) {
   return true;
 }
 
-export function createTriggers({ app, api, engine }) {
+// hooks (opcional): { isListening(wfId), onWebhook(wf, node, input, req), validateWebhook(node, input) } — datasets.js
+export function createTriggers({ app, api, engine, hooks = {} }) {
   let tasks = [];
 
   // Reprograma todos los nodos Cron de los workflows activos.
@@ -46,19 +47,25 @@ export function createTriggers({ app, api, engine }) {
     const path = norm(req.params[0]);
     const matches = [];
     for (const wf of Workflows.list()) {
-      if (!wf.active) continue;
+      // Un workflow inactivo también responde mientras está en modo escucha (captura de datos reales)
+      if (!wf.active && !hooks.isListening?.(wf.id)) continue;
       for (const n of wf.graph?.nodes || []) {
         if (n.type === 'webhook' && norm(n.params?.path) === path && (n.params?.method || 'POST') === req.method) matches.push({ wf, n });
       }
     }
     if (!matches.length) return res.status(404).json({ error: `Ningún workflow activo escucha ${req.method} /hooks${path}` });
-    const allowed = matches.filter(m => checkAuth(m.n, req));
-    if (!allowed.length) return res.status(401).json({ error: 'Autenticación de webhook inválida' });
+    const authed = matches.filter(m => checkAuth(m.n, req));
+    if (!authed.length) return res.status(401).json({ error: 'Autenticación de webhook inválida' });
 
     const input = {
       body: req.body, query: req.query, method: req.method,
       headers: Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['authorization', 'cookie', 'x-api-key'].includes(k))),
     };
+    // «Validar llamadas reales»: 400 si falta un campo obligatorio o el tipo no coincide
+    const checked = authed.map(m => ({ ...m, errors: hooks.validateWebhook?.(m.n, input) || [] }));
+    const allowed = checked.filter(m => !m.errors.length);
+    if (!allowed.length) return res.status(400).json({ error: 'Entrada no válida', fields: checked[0].errors });
+    for (const { wf, n } of allowed) { try { hooks.onWebhook?.(wf, n, input, req); } catch (e) { console.error('[escucha]', e.message); } }
     const started = allowed.map(({ wf, n }) => engine.start(wf.id, { mode: 'webhook', triggerNodeId: n.id, input }));
     if (allowed[0].n.params?.respond === 'Al terminar') {
       try { return res.json((await started[0].done) ?? {}); }

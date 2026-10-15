@@ -39,6 +39,22 @@ CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT DEFAULT '', config TEXT NOT NULL,
   created_at INTEGER, updated_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS datasets (
+  id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT DEFAULT 'manual',
+  common TEXT DEFAULT '{}', position INTEGER DEFAULT 0, created_at INTEGER, updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS datasets_wf ON datasets (workflow_id, position);
+CREATE TABLE IF NOT EXISTS cases (
+  id TEXT PRIMARY KEY, dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE, name TEXT NOT NULL,
+  vals TEXT DEFAULT '{}', removed TEXT DEFAULT '[]', expect TEXT DEFAULT '[]', expect_error INTEGER DEFAULT 0,
+  source TEXT, last_run_id TEXT, last_status TEXT, last_pass INTEGER, position INTEGER DEFAULT 0, created_at INTEGER, updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS cases_ds ON cases (dataset_id, position);
+CREATE TABLE IF NOT EXISTS batches (
+  id TEXT PRIMARY KEY, dataset_id TEXT NOT NULL, workflow_id TEXT, status TEXT, results TEXT DEFAULT '[]',
+  started_at INTEGER, finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS batches_ds ON batches (dataset_id, started_at DESC);
 `);
 
 // Sentencias preparadas una sola vez y reutilizadas
@@ -53,13 +69,16 @@ if (!cols('steps').includes('meta')) db.exec('ALTER TABLE steps ADD COLUMN meta 
 if (!cols('steps').includes('port')) db.exec('ALTER TABLE steps ADD COLUMN port TEXT');
 if (!cols('steps').includes('child_run_id')) db.exec('ALTER TABLE steps ADD COLUMN child_run_id TEXT');
 if (!cols('workflows').includes('collection')) db.exec("ALTER TABLE workflows ADD COLUMN collection TEXT DEFAULT ''");
+// Casos de prueba: qué caso (y qué lote) lanzó cada ejecución
+if (!cols('runs').includes('case_id')) db.exec('ALTER TABLE runs ADD COLUMN case_id TEXT');
+if (!cols('runs').includes('batch_id')) db.exec('ALTER TABLE runs ADD COLUMN batch_id TEXT');
 
 const j = v => (v === undefined ? null : JSON.stringify(v));
 const p = s => (s == null ? null : JSON.parse(s));
 export const newId = pfx => `${pfx}_${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`;
 
 const rowWf = r => r && ({ id: r.id, name: r.name, description: r.description, collection: r.collection || '', active: !!r.active, graph: p(r.graph), createdAt: r.created_at, updatedAt: r.updated_at });
-const rowRun = r => r && ({ id: r.id, seq: r.seq, workflowId: r.workflow_id, workflowName: r.workflow_name, status: r.status, mode: r.mode, input: p(r.input), output: p(r.output), error: r.error, parentRunId: r.parent_run_id, startedAt: r.started_at, finishedAt: r.finished_at });
+const rowRun = r => r && ({ id: r.id, seq: r.seq, workflowId: r.workflow_id, workflowName: r.workflow_name, status: r.status, mode: r.mode, input: p(r.input), output: p(r.output), error: r.error, parentRunId: r.parent_run_id, caseId: r.case_id || null, batchId: r.batch_id || null, startedAt: r.started_at, finishedAt: r.finished_at });
 const rowStep = r => r && ({ id: r.id, runId: r.run_id, nodeId: r.node_id, nodeName: r.node_name, nodeType: r.node_type, status: r.status, worker: r.worker, input: p(r.input), output: p(r.output), error: r.error, attempt: r.attempt, meta: p(r.meta), port: r.port || null, childRunId: r.child_run_id || null, startedAt: r.started_at, finishedAt: r.finished_at });
 
 export const Workflows = {
@@ -81,14 +100,16 @@ export const Workflows = {
     return this.get(id);
   },
   remove: id => q('DELETE FROM workflows WHERE id = ?').run(id).changes > 0,
+  // Cambia el grafo sin tocar updated_at (migraciones: no reordenan la lista)
+  setGraph: (id, graph) => q('UPDATE workflows SET graph=? WHERE id=?').run(j(graph), id),
 };
 
 export const Runs = {
-  create({ workflowId, workflowName, mode, input, parentRunId }) {
+  create({ workflowId, workflowName, mode, input, parentRunId, caseId, batchId }) {
     const seq = q('SELECT COALESCE(MAX(seq), 1000) + 1 AS s FROM runs').get().s;
     const id = `EX-${seq}`;
-    q('INSERT INTO runs (id, seq, workflow_id, workflow_name, status, mode, input, parent_run_id, started_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(id, seq, workflowId, workflowName, 'running', mode, j(input), parentRunId || null, Date.now());
+    q('INSERT INTO runs (id, seq, workflow_id, workflow_name, status, mode, input, parent_run_id, case_id, batch_id, started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, seq, workflowId, workflowName, 'running', mode, j(input), parentRunId || null, caseId || null, batchId || null, Date.now());
     return this.get(id);
   },
   get: id => rowRun(q('SELECT * FROM runs WHERE id = ?').get(id)),
@@ -186,4 +207,68 @@ export const Agents = {
     return this.get(id);
   },
   remove: id => q('DELETE FROM agents WHERE id = ?').run(id).changes > 0,
+};
+
+// Conjuntos de datos de prueba (por workflow) y sus casos. Un caso guarda SOLO lo que difiere de los
+// valores comunes del conjunto (vals) y las claves que quita (removed).
+const rowDs = r => r && ({ id: r.id, workflowId: r.workflow_id, name: r.name, kind: r.kind || 'manual', common: p(r.common) || {}, position: r.position, createdAt: r.created_at, updatedAt: r.updated_at });
+export const Datasets = {
+  byWorkflow: wfId => q('SELECT * FROM datasets WHERE workflow_id = ? ORDER BY position, created_at').all(wfId).map(rowDs),
+  get: id => rowDs(q('SELECT * FROM datasets WHERE id = ?').get(id)),
+  findKind: (wfId, kind) => rowDs(q('SELECT * FROM datasets WHERE workflow_id = ? AND kind = ? ORDER BY created_at LIMIT 1').get(wfId, kind)),
+  create({ workflowId, name, kind = 'manual', common = {} }) {
+    const id = newId('ds'), now = Date.now();
+    const pos = q('SELECT COALESCE(MAX(position), -1) + 1 AS n FROM datasets WHERE workflow_id = ?').get(workflowId).n;
+    q('INSERT INTO datasets (id, workflow_id, name, kind, common, position, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, workflowId, name, kind, j(common), pos, now, now);
+    return this.get(id);
+  },
+  update(id, { name, common, position }) {
+    const cur = this.get(id);
+    if (!cur) return null;
+    q('UPDATE datasets SET name=?, common=?, position=?, updated_at=? WHERE id=?').run(name ?? cur.name, j(common ?? cur.common), position ?? cur.position, Date.now(), id);
+    return this.get(id);
+  },
+  remove: id => q('DELETE FROM datasets WHERE id = ?').run(id).changes > 0,
+  removeByWorkflow: wfId => q('DELETE FROM datasets WHERE workflow_id = ?').run(wfId),
+};
+
+const rowCase = r => r && ({
+  id: r.id, datasetId: r.dataset_id, name: r.name, values: p(r.vals) || {}, removed: p(r.removed) || [], expect: p(r.expect) || [],
+  expectError: !!r.expect_error, source: p(r.source), lastRunId: r.last_run_id || null, lastStatus: r.last_status || null,
+  lastPass: r.last_pass == null ? null : !!r.last_pass, position: r.position, createdAt: r.created_at, updatedAt: r.updated_at,
+});
+export const Cases = {
+  byDataset: dsId => q('SELECT * FROM cases WHERE dataset_id = ? ORDER BY position, created_at').all(dsId).map(rowCase),
+  get: id => rowCase(q('SELECT * FROM cases WHERE id = ?').get(id)),
+  create({ datasetId, name, values = {}, removed = [], expect = [], expectError = false, source = { type: 'manual' } }) {
+    const id = newId('cs'), now = Date.now();
+    const pos = q('SELECT COALESCE(MAX(position), -1) + 1 AS n FROM cases WHERE dataset_id = ?').get(datasetId).n;
+    q('INSERT INTO cases (id, dataset_id, name, vals, removed, expect, expect_error, source, position, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, datasetId, name, j(values), j(removed), j(expect), expectError ? 1 : 0, j(source), pos, now, now);
+    return this.get(id);
+  },
+  update(id, patch) {
+    const cur = this.get(id);
+    if (!cur) return null;
+    const n = { ...cur, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) };
+    q('UPDATE cases SET name=?, vals=?, removed=?, expect=?, expect_error=?, position=?, updated_at=? WHERE id=?')
+      .run(n.name, j(n.values), j(n.removed), j(n.expect), n.expectError ? 1 : 0, n.position, Date.now(), id);
+    return this.get(id);
+  },
+  setResult: (id, { runId, status, pass }) => q('UPDATE cases SET last_run_id=?, last_status=?, last_pass=? WHERE id=?').run(runId, status, pass == null ? null : pass ? 1 : 0, id),
+  remove: id => q('DELETE FROM cases WHERE id = ?').run(id).changes > 0,
+};
+
+const rowBatch = r => r && ({ id: r.id, datasetId: r.dataset_id, workflowId: r.workflow_id, status: r.status, results: p(r.results) || [], startedAt: r.started_at, finishedAt: r.finished_at });
+export const Batches = {
+  get: id => rowBatch(q('SELECT * FROM batches WHERE id = ?').get(id)),
+  last: dsId => rowBatch(q('SELECT * FROM batches WHERE dataset_id = ? ORDER BY started_at DESC LIMIT 1').get(dsId)),
+  create({ datasetId, workflowId, results }) {
+    const id = newId('lt');
+    q('INSERT INTO batches (id, dataset_id, workflow_id, status, results, started_at) VALUES (?,?,?,?,?,?)').run(id, datasetId, workflowId, 'running', j(results), Date.now());
+    return this.get(id);
+  },
+  save: (id, { status, results, finished }) => q('UPDATE batches SET status=?, results=?, finished_at=COALESCE(?, finished_at) WHERE id=?').run(status, j(results), finished ? Date.now() : null, id),
+  markInterrupted: () => q("UPDATE batches SET status='interrupted', finished_at=? WHERE status='running'").run(Date.now()),
 };
